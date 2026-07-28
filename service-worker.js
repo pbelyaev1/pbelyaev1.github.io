@@ -198,18 +198,24 @@ self.addEventListener('push', event => {
   try { if (event.data) d = { ...d, ...event.data.json() }; } catch (e) {
     try { d.body = event.data.text(); } catch (e2) {}
   }
-  event.waitUntil(self.registration.showNotification(d.title, {
-    body: d.body,
-    icon: 'android-icon-192x192.png',
-    badge: 'favicon-32x32.png',
-    tag: d.tag || 'pet',
-    renotify: true,
-    data: { url: d.url || './' }
-  }));
+  event.waitUntil((async () => {
+    await self.registration.showNotification(d.title, {
+      body: d.body,
+      icon: 'android-icon-192x192.png',
+      badge: 'favicon-32x32.png',
+      // один и тот же ярлык: новое напоминание заменяет старое, а не копится
+      tag: d.tag === 'test' ? 'test' : 'pet',
+      renotify: true,
+      data: { url: d.url || './' }
+    });
+    // кружок на иконке приложения — видно с домашнего экрана, даже не открывая
+    try { if (self.navigator && self.navigator.setAppBadge) await self.navigator.setAppBadge(d.count || 1); } catch (e) {}
+  })());
 });
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
+  try { if (self.navigator && self.navigator.clearAppBadge) self.navigator.clearAppBadge(); } catch (e) {}
   const target = (event.notification.data && event.notification.data.url) || './';
   event.waitUntil((async () => {
     const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });

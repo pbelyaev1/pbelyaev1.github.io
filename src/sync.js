@@ -745,8 +745,18 @@
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) pushSave(true);
-    else setTimeout(() => checkRemote(true), 800);
+    else {
+      clearBadge();
+      setTimeout(() => checkRemote(true), 800);
+    }
   });
+
+  /* Кружок на иконке приложения ставит служебный процесс, когда приходит
+     напоминание. Открыли игру — снимаем. */
+  function clearBadge() {
+    try { if (navigator.clearAppBadge) navigator.clearAppBadge(); } catch (e) {}
+  }
+  clearBadge();
   window.addEventListener('pagehide', () => pushSave(true));
   window.addEventListener('online', () => { pushSave(false); checkRemote(true); });
 
@@ -1039,7 +1049,11 @@
   setTimeout(() => clearInterval(noticeTimer), 20000);
   hookNotices();
 
-  const DROP_FROM_SETTINGS = /(save data is at risk|сохранение под угрозой|manual save|ручное сохранение)/i;
+  const DROP_FROM_SETTINGS = new RegExp([
+    'save data is at risk', 'сохранение под угрозой',
+    'manual save', 'ручное сохранение',
+    'credits', 'send feedback', 'rate us', 'see changelog', 'discord'
+  ].join('|'), 'i');
 
   /* ---------- пункт в настройках игры ---------- */
   function menuItem() {
