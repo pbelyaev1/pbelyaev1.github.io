@@ -1,23 +1,25 @@
 /* ============================================================================
    Синхронизация и уведомления.
 
-   Что делает:
-     • держит сохранение на сервере, чтобы играть с телефона и с компьютера;
-     • заранее считает, когда питомцу что-то понадобится, и просит сервер
-       прислать напоминание — даже если игра закрыта;
-     • ничего не ломает, если сервер не настроен: тогда просто молчит.
+     • полное сохранение на сервере: питомец, настройки, комнаты, мебель,
+       растения, животные, миссии, рекорды — всё, что игра вообще хранит;
+     • обмен идёт сам: после каждого изменения игра отправляет состояние,
+       второе устройство подхватывает его;
+     • напоминания приходят тогда, когда питомцу действительно что-то нужно.
 
-   Всё настраивается прямо в игре: настройки → «сервер и уведомления».
-   Консоль не нужна.
+   Адрес сервера зашит ниже — игроку его вводить не надо.
    ============================================================================ */
 (function () {
   'use strict';
 
-  const SYNC_SERVER = '';          // например: https://tama.твоё-имя.workers.dev
+  const SYNC_SERVER = 'https://ancient-snow-7a9e.pbelyaev12.workers.dev';
 
   const LS = {
-    server: 'tama_sync_server',
+    server: 'tama_sync_server',     // необязательное переопределение адреса
     token:  'tama_sync_token',
+    device: 'tama_sync_device',
+    hash:   'tama_sync_hash',
+    active: 'tama_sync_last_active',
     on:     'tama_sync_enabled',
   };
   const get = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
@@ -30,6 +32,24 @@
   const wait = ms => new Promise(r => setTimeout(r, ms));
   /* App объявлен через const — в window его нет, только в глобальной области */
   const hasApp = () => typeof App !== 'undefined' && !!App;
+
+  function deviceId() {
+    let d = get(LS.device);
+    if (!d) {
+      d = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      set(LS.device, d);
+    }
+    return d;
+  }
+
+  function hashString(s) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return h.toString(36);
+  }
 
   async function api(path, opts = {}) {
     if (!server()) throw new Error('Сервер не задан');
@@ -45,7 +65,7 @@
         }
       });
     } catch (e) {
-      throw new Error('Сервер не отвечает. Проверь адрес и что воркер задеплоен.');
+      throw new Error('Сервер не отвечает');
     }
     let data = null;
     try { data = await r.json(); } catch (e) {}
@@ -53,104 +73,296 @@
     return { status: r.status, data };
   }
 
-  /* ---------- когда питомцу что-то понадобится ----------
-     Показатели в игре пересчитываются раз в секунду, поэтому время до нуля
-     считается прямо: сколько осталось делим на расход в секунду.        */
-  const BASE = { hunger: 0.0145, fun: 0.0235, sleep: 0.0034, bladder: 0.015 };
-  const STAGE_MULT = { 0: 1.65, 1: 1.46, 2: 1.3 };   // малыш / ребёнок / подросток
-  const REASON = {
-    hunger:  'проголодался',
-    fun:     'скучает и хочет поиграть',
-    sleep:   'совсем сонный',
-    bladder: 'просится в туалет'
+  /* ======================================================================
+     Что и когда понадобится питомцу
+
+     Пока игра закрыта, показатели падают в 4 раза медленнее (множитель 0.25),
+     а ночью — в 20 раз (0.05). Раньше здесь считалась скорость «как в игре»,
+     поэтому напоминания приходили сильно раньше времени. Теперь состояние
+     проигрывается вперёд шагами по минуте — ровно по правилам Pet.js.
+     ====================================================================== */
+
+  const HORIZON_HOURS = 72;
+  const STEP_SEC = 60;
+
+  const NEED_TEXT = {
+    hunger:     { title: '{name} проголодался',        body: 'Пора покормить' },
+    fun:        { title: '{name} скучает',             body: 'Хочет поиграть' },
+    sleep:      { title: '{name} хочет спать',         body: 'Пора выключить свет' },
+    toilet:     { title: '{name} просится в туалет',   body: 'Отведи его' },
+    poop:       { title: 'У {name} грязно',            body: 'Надо убрать' },
+    clean:      { title: '{name} испачкался',          body: 'Пора помыть' },
+    sick:       { title: '{name} заболел',             body: 'Нужно лекарство' },
+    danger:     { title: '{name} совсем плохо!',       body: 'Срочно зайди в игру' },
+    misbehave:  { title: '{name} балуется',            body: 'Стоит поругать' },
+    egg:        { title: 'Яйцо шевелится',             body: 'Кажется, скоро вылупится' },
   };
 
-  function predictNextCall() {
-    try {
-      const p = App.pet, s = p && p.stats;
-      if (!s || s.is_egg) return null;
-      const stage = App.petDefinition && App.petDefinition.lifeStage;
-      const mult = STAGE_MULT[stage] || 1;
-
-      let best = null;
-      for (const key of Object.keys(BASE)) {
-        const cur = s['current_' + key];
-        if (typeof cur !== 'number') continue;
-        const perSec = BASE[key] * mult;
-        if (perSec <= 0) continue;
-        const secs = Math.max(0, cur) / perSec;
-        if (best === null || secs < best.secs) best = { secs, key };
-      }
-      if (!best) return null;
-
-      let at = Date.now() + best.secs * 1000;
-
-      // ночью питомец спит и всё равно не отреагирует — переносим на утро
-      const d = new Date(at), h = d.getHours();
-      if (h >= 22 || h < 9) {
-        const m = new Date(at);
-        if (h >= 22) m.setDate(m.getDate() + 1);
-        m.setHours(9, 30, 0, 0);
-        at = m.getTime();
-      }
-      return { at: Math.round(at), reason: REASON[best.key] };
-    } catch (e) { return null; }
+  function isSleepHourAt(date) {
+    try { return App.isSleepHour(date.getHours()); }
+    catch (e) { const h = date.getHours(); return h >= 21 || h < 8; }
   }
 
-  /* ---------- обмен сохранением ---------- */
-  let busy = false, lastPush = 0;
+  /* ночью не будим: переносим на 9:30 утра */
+  function shiftFromNight(ms) {
+    const d = new Date(ms), h = d.getHours();
+    if (h >= 22 || h < 9) {
+      const m = new Date(ms);
+      if (h >= 22) m.setDate(m.getDate() + 1);
+      m.setHours(9, 30, 0, 0);
+      return m.getTime();
+    }
+    return ms;
+  }
+
+  function collectNeeds() {
+    if (!hasApp() || !App.pet || !App.pet.stats || !App.petDefinition) return [];
+    const s = App.pet.stats;
+    const name = App.petDefinition.name || 'Питомец';
+    const found = {};
+    const now = Date.now();
+
+    const mark = (key, at) => { if (found[key] == null) found[key] = at; };
+
+    if (s.is_dead) return [];
+    if (s.is_egg) { mark('egg', now); return finish(found, name, now); }
+
+    const has = n => { try { return !!App.petDefinition.hasTrait(n); } catch (e) { return false; } };
+    const stage = App.petDefinition.lifeStage;
+    const stageMult = ({ 0: 1.65, 1: 1.46, 2: 1.3 })[stage] || 1;
+
+    const r = {
+      hunger:  s.hunger_depletion_rate      * stageMult * (has('lightEater') ? 0.5 : 1)   * (has('voraciousHunger') ? 1.5 : 1),
+      fun:     s.fun_depletion_rate         * stageMult * (has('chill') ? 0.5 : 1)        * (has('playBurnout') ? 1.5 : 1),
+      sleep:   s.sleep_depletion_rate       * stageMult * (has('deepSleeper') ? 0.5 : 1)  * (has('restless') ? 1.5 : 1),
+      bladder: s.bladder_depletion_rate     * stageMult * (has('ironBladder') ? 0.5 : 1)  * (has('tinyTank') ? 1.5 : 1),
+      clean:   s.cleanliness_depletion_rate * stageMult * (has('selfCleaning') ? 0.5 : 1) * (has('dustMagnet') ? 1.5 : 1),
+      health:  s.health_depletion_rate      * stageMult * (has('germGuardian') ? 0.5 : 1),
+    };
+
+    // пороги берём те же, по которым сама игра понимает, что питомец чего-то хочет
+    const T = {
+      hunger: s.hunger_min_desire != null ? s.hunger_min_desire : 40,
+      fun:    s.fun_min_desire    != null ? s.fun_min_desire    : 35,
+      sleep:  s.sleep_min_desire  != null ? s.sleep_min_desire  : 20,
+      toilet: (s.max_bladder || 100) / 4,
+      clean:  25,
+      sick:   (s.max_health || 100) * 0.25,
+      danger: (s.max_health || 100) * 0.1,
+    };
+
+    let hunger = s.current_hunger, fun = s.current_fun, sleep = s.current_sleep,
+        bladder = s.current_bladder, clean = s.current_cleanliness, health = s.current_health,
+        poop = s.has_poop_out || 0;
+
+    if (s.is_misbehaving) mark('misbehave', now);
+
+    const steps = Math.round(HORIZON_HOURS * 3600 / STEP_SEC);
+    for (let i = 0; i <= steps; i++) {
+      const at = now + i * STEP_SEC * 1000;
+      const night = isSleepHourAt(new Date(at));
+      const mult = night ? 0.05 : 0.25;          // игра закрыта
+      const dt = STEP_SEC;
+
+      if (hunger <= T.hunger) mark('hunger', at);
+      if (fun <= T.fun) mark('fun', at);
+      if (!night && sleep <= T.sleep) mark('sleep', at);
+      if (bladder <= T.toilet) mark('toilet', at);
+      if (poop > 0) mark('poop', at);
+      if (clean <= T.clean) mark('clean', at);
+      if (health <= T.sick) mark('sick', at);
+      if (health <= T.danger) mark('danger', at);
+
+      // шаг вперёд
+      hunger = Math.max(0, hunger - r.hunger * mult * dt);
+      fun    = Math.max(0, fun    - r.fun    * mult * dt);
+      clean  = Math.max(0, clean  - r.clean  * mult * dt);
+      if (night) sleep = Math.min(s.max_sleep || 100, sleep + (s.sleep_replenish_rate || 0.1) * 2 * dt);
+      else       sleep = Math.max(0, sleep - r.sleep * mult * dt);
+
+      bladder -= r.bladder * mult * dt;
+      if (bladder <= 0) {
+        bladder = s.max_bladder || 100;
+        if (!s.is_potty_trained) poop += 1;
+      }
+      // здоровье падает только когда грязно или лежат какашки
+      if (poop > 0 || clean <= 25) {
+        health = Math.max(0, health - r.health * (s.health_depletion_mult || 0.5) * mult * dt);
+      }
+
+      if (Object.keys(found).length >= 8) break;
+    }
+
+    return finish(found, name, now);
+  }
+
+  function finish(found, name, now) {
+    return Object.keys(found).map(key => {
+      const t = NEED_TEXT[key] || { title: '{name} зовёт', body: 'Кажется, ему что-то нужно' };
+      return {
+        key,
+        at: shiftFromNight(Math.max(found[key], now)),
+        title: t.title.replace('{name}', name),
+        body: t.body
+      };
+    }).sort((a, b) => a.at - b.at);
+  }
+
+  /* ======================================================================
+     Обмен сохранением
+     ====================================================================== */
+
+  const VOLATILE = ['last_time', 'play_time'];   // меняются сами, на них реагировать не надо
+
+  async function buildSave() {
+    const storage = await App.getDBItems();
+    const code = await App.getSaveCode(storage);
+    const stable = {};
+    Object.keys(storage).sort().forEach(k => { if (!VOLATILE.includes(k)) stable[k] = storage[k]; });
+    return { code, hash: hashString(JSON.stringify(stable)) };
+  }
+
+  const IDLE_QUIET = 5 * 60 * 1000;    // столько ещё «считаемся играющими» после последнего касания
+  const PULL_THROTTLE = 45 * 1000;     // не чаще, чем раз в столько, забираем с сервера
+  let busy = false, lastPushAt = 0, lastPullAt = 0, pushTimer = null, applying = false;
+  /* Последнее действие человека на этом устройстве. Живёт в localStorage:
+     после перезагрузки страницы устройство не должно «забывать», что им
+     только что пользовались, иначе главным станет то, где играли раньше. */
+  let lastInteraction = Number(get(LS.active)) || 0;
+  function touch() {
+    lastInteraction = Date.now();
+    set(LS.active, String(lastInteraction));
+    schedulePush();
+  }
 
   async function pushSave(force) {
-    if (!enabled() || !token() || busy) return { ok: false, msg: 'Синхронизация не настроена' };
-    if (!force && Date.now() - lastPush < 60_000) return { ok: true, msg: 'Недавно уже отправляли' };
+    if (!enabled() || applying) return { ok: false, msg: 'Синхронизация выключена' };
+    if (!hasApp() || !App.pet || !App.loadingEnded) return { ok: false, msg: 'Игра ещё не загрузилась' };
+    if (busy) return { ok: false, msg: 'Уже отправляем' };
     busy = true;
     try {
-      const code = await App.getSaveCode();
-      const next = predictNextCall();
+      if (!token() && !(await ensureAccount())) return { ok: false, msg: 'Нет связи с сервером' };
+      // Простаивающее устройство молчит: иначе его тиканье выглядит как
+      // «новое состояние» и второе устройство бесконечно себя перезагружает.
+      if (!force && !document.hidden && Date.now() - lastInteraction > IDLE_QUIET) {
+        return { ok: true, msg: 'Устройство простаивает', skipped: true };
+      }
+      const { code, hash } = await buildSave();
+      if (!force && hash === get(LS.hash)) return { ok: true, msg: 'Изменений нет', skipped: true };
+
       const res = await api('/api/save', {
         method: 'PUT',
         body: JSON.stringify({
           save: code,
+          hash,
           last_time: Date.now(),
-          next_call_at: next && next.at,
-          call_reason: next && next.reason,
+          device: deviceId(),
+          active: lastInteraction,
+          seen: document.visibilityState === 'visible' ? Date.now() : 0,
+          needs: collectNeeds(),
           pet_name: (App.petDefinition && App.petDefinition.name) || null
         })
       });
-      if (res.status === 409) return { ok: false, msg: 'На сервере более свежее сохранение' };
-      lastPush = Date.now();
-      return { ok: true, msg: 'Сохранение отправлено' };
+      if (res.status === 409) {
+        // мы отстали: на другом устройстве играли позже — забираем оттуда
+        setTimeout(() => checkRemote(true), 600);
+        return { ok: false, msg: 'На сервере более свежее состояние' };
+      }
+      set(LS.hash, hash);
+      lastPushAt = Date.now();
+      return { ok: true, msg: 'Отправлено на сервер' };
     } catch (e) {
-      console.warn('[sync] не удалось отправить:', e.message);
       return { ok: false, msg: e.message };
     } finally { busy = false; }
   }
 
-  /* кодируется как btoa(encodeURIComponent(json)) — раскручиваем в обратном порядке */
+  function schedulePush() {
+    if (!enabled() || pushTimer) return;
+    const since = Date.now() - lastPushAt;
+    const delay = Math.max(5000, 15000 - since);
+    pushTimer = setTimeout(() => { pushTimer = null; pushSave(false); }, delay);
+  }
+
   function decodeSave(code) {
     const inner = String(code).replace(/^save:/, '').replace(/:endsave$/, '');
     return JSON.parse(decodeURIComponent(atob(inner)));
   }
 
-  async function pullSave() {
-    const res = await api('/api/save');
-    return res.data;
-  }
-
-  async function applyRemoteSave() {
-    const remote = await pullSave();
+  /* Полная замена состояния тем, что лежит на сервере.
+     Свою функцию пишем потому, что штатная App.loadFromJson сбрасывает
+     день рождения питомца и выбрасывает имя игрока — для импорта чужого
+     сохранения это правильно, а для синхронизации своих же устройств нет. */
+  async function applyRemote(remote) {
     if (!remote || !remote.save) return { ok: false, msg: 'На сервере пока нет сохранения' };
     let json;
     try { json = decodeSave(remote.save); }
     catch (e) { return { ok: false, msg: 'Сохранение на сервере повреждено' }; }
-    App.loadFromJson(json, () => {
-      popup('Загружено с сервера', 2000);
-      setTimeout(() => location.reload(), 1500);
-    });
-    return { ok: true, msg: 'Загружаем…' };
+    if (!json || typeof json !== 'object' || !json.pet) return { ok: false, msg: 'Сохранение на сервере повреждено' };
+
+    applying = true;
+    try {
+      App.save = () => {};                              // чтобы игра не переписала то, что кладём
+      const keep = ['mods', 'shell_background_v2.2'];   // эти не сериализуются, оставляем свои
+      const incoming = Object.keys(json);
+      for (const key of incoming) await window.idbKeyval.set(key, json[key]);
+      for (const key of await window.idbKeyval.keys()) {
+        if (!incoming.includes(key) && !keep.includes(key)) await window.idbKeyval.del(key);
+      }
+      // зеркало в localStorage — игра читает его как запасной вариант
+      for (const key of incoming) {
+        try { window.localStorage.setItem(key, JSON.stringify(json[key])); } catch (e) {}
+      }
+      const stable = {};
+      Object.keys(json).sort().forEach(k => { if (!VOLATILE.includes(k)) stable[k] = json[k]; });
+      set(LS.hash, hashString(JSON.stringify(stable)));
+      return { ok: true, msg: 'Загружено с сервера' };
+    } catch (e) {
+      applying = false;
+      return { ok: false, msg: 'Не удалось применить: ' + (e.message || e) };
+    }
   }
 
-  /* ---------- уведомления ---------- */
+  async function pullAndApply(silent) {
+    const { data } = await api('/api/save');
+    const res = await applyRemote(data);
+    if (res.ok && data && data.hash) set(LS.hash, data.hash);
+    if (res.ok) {
+      if (!silent) popup('Забираю прогресс с другого устройства…', 2000);
+      setTimeout(() => location.reload(), silent ? 400 : 1200);
+    }
+    return res;
+  }
+
+  /* ---------- сторож: не играли ли только что на другом устройстве ----------
+     Сравнивать «что новее» по времени сохранения нельзя: игра тикает сама
+     по себе на обоих устройствах сразу. Ориентир — последнее действие
+     человека. Кого трогали позже, тот и главный.                        */
+  function otherIsAhead(data) {
+    if (!data || !data.has_save || !data.hash) return false;
+    if (data.hash === get(LS.hash)) return false;              // ровно то, что у нас уже есть
+    const theirs = Number(data.active) || 0;
+    if (!theirs) return false;
+    return theirs > lastInteraction + 5000;                    // там играли позже, чем здесь
+  }
+
+  async function checkRemote(fromUser) {
+    if (!enabled() || applying || busy || !token()) return;
+    if (!hasApp() || !App.loadingEnded) return;
+    if (!fromUser) {
+      if (Date.now() - lastInteraction < 30000) return;         // здесь прямо сейчас играют
+      if (Date.now() - lastPullAt < PULL_THROTTLE) return;
+    }
+    try {
+      const { data } = await api('/api/meta');
+      if (!otherIsAhead(data)) return;
+      lastPullAt = Date.now();
+      await pullAndApply(false);
+    } catch (e) { /* тихо: сеть могла моргнуть */ }
+  }
+
+  /* ======================================================================
+     Уведомления
+     ====================================================================== */
   const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) ||
                       (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isStandalone = () => {
@@ -166,7 +378,6 @@
     if (isIOS() && !isStandalone()) {
       return { ok: false, msg: 'На айфоне сначала добавь игру на домашний экран и открой её оттуда' };
     }
-    if (!server()) return { ok: false, msg: 'Сначала укажи адрес сервера' };
     if (!token() && !(await ensureAccount().catch(() => false))) {
       return { ok: false, msg: 'Сервер не отвечает' };
     }
@@ -179,11 +390,8 @@
     catch (e) { return { ok: false, msg: 'Не удалось спросить разрешение' }; }
     if (perm !== 'granted') return { ok: false, msg: 'Разрешение не выдано' };
 
-    const reg = await Promise.race([
-      navigator.serviceWorker.ready,
-      wait(10000).then(() => null)
-    ]);
-    if (!reg) return { ok: false, msg: 'Служебный процесс не запустился — перезагрузи страницу и попробуй снова' };
+    const reg = await Promise.race([navigator.serviceWorker.ready, wait(10000).then(() => null)]);
+    if (!reg) return { ok: false, msg: 'Служебный процесс не запустился — перезагрузи страницу' };
 
     let sub;
     try {
@@ -191,7 +399,7 @@
       if (!sub) {
         const { data } = await api('/api/vapid').catch(() => ({ data: null }));
         const key = (data && data.key) || window.TAMA_VAPID_PUBLIC;
-        if (!key) return { ok: false, msg: 'Сервер не отдал ключ уведомлений (проверь секреты VAPID)' };
+        if (!key) return { ok: false, msg: 'Сервер не отдал ключ уведомлений' };
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: Uint8Array.from(
@@ -204,10 +412,11 @@
 
     const j = sub.toJSON();
     try {
-      await api('/api/subscribe', { method: 'POST', body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }) });
-    } catch (e) {
-      return { ok: false, msg: e.message };
-    }
+      await api('/api/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys, device: deviceId() })
+      });
+    } catch (e) { return { ok: false, msg: e.message }; }
     return { ok: true, msg: 'Уведомления включены' };
   }
 
@@ -215,7 +424,10 @@
     try {
       const reg = await navigator.serviceWorker.getRegistration();
       const sub = reg && await reg.pushManager.getSubscription();
-      if (sub) await sub.unsubscribe();
+      if (sub) {
+        await api('/api/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {});
+        await sub.unsubscribe();
+      }
     } catch (e) {}
     return { ok: true, msg: 'Уведомления отключены на этом устройстве' };
   }
@@ -231,7 +443,9 @@
     } catch (e) { return 'выключены'; }
   }
 
-  /* ---------- первый запуск ---------- */
+  /* ======================================================================
+     Запуск
+     ====================================================================== */
   async function ensureAccount() {
     if (token()) return true;
     const { data } = await api('/api/register', { method: 'POST' });
@@ -239,55 +453,52 @@
     return false;
   }
 
-  async function connect(url) {
-    const clean = String(url || '').trim().replace(/\/+$/, '');
-    if (!/^https?:\/\//.test(clean)) return { ok: false, msg: 'Адрес должен начинаться с https://' };
-    const prev = get(LS.server);
-    set(LS.server, clean);
-    set(LS.on, '1');
-    try {
-      await ensureAccount();
-      const st = (await api('/api/status')).data;
-      await pushSave(true);
-      return { ok: true, msg: 'Сервер подключён', status: st };
-    } catch (e) {
-      if (prev) set(LS.server, prev); else set(LS.server, '');
-      return { ok: false, msg: e.message };
-    }
-  }
-
   async function boot() {
     if (!enabled()) return;
     try {
       await ensureAccount();
-      const remote = await pullSave();
-      const localTime = Number(await (window.idbKeyval ? idbKeyval.get('last_time') : 0)) || 0;
-      if (remote && remote.save && remote.last_time && remote.last_time > localTime + 60_000) {
-        // на сервере состояние свежее — предлагаем забрать
-        const ask = () => App.displayConfirm(
-          'На сервере сохранение <b>новее</b>, чем на этом устройстве.<br>Загрузить его? Текущий прогресс здесь будет заменён.',
-          [
-            { name: 'загрузить', onclick: () => { applyRemoteSave(); } },
-            { name: 'нет', class: 'back-btn', onclick: () => { pushSave(true); } }
-          ]
-        );
-        if (hasApp() && App.displayConfirm) { ask(); return; }
+      const { data } = await api('/api/meta');
+      if (otherIsAhead(data)) {
+        const res = await pullAndApply(false);
+        if (res.ok) return;
       }
       await pushSave(true);
     } catch (e) {
-      console.warn('[sync] отключена:', e.message);
+      console.warn('[sync] недоступна:', e.message);
     }
   }
 
-  /* отправляем при сворачивании и раз в несколько минут */
-  document.addEventListener('visibilitychange', () => { if (document.hidden) pushSave(true); });
-  window.addEventListener('pagehide', () => pushSave(true));
-  setInterval(() => pushSave(false), 3 * 60 * 1000);
+  /* ---------- когда отправлять и когда проверять ---------- */
+  function hookSave() {
+    if (!hasApp() || typeof App.save !== 'function' || App.save.__tamaSync) return false;
+    const orig = App.save;
+    const wrapped = function () {
+      const out = orig.apply(this, arguments);
+      schedulePush();
+      return out;
+    };
+    wrapped.__tamaSync = true;
+    App.save = wrapped;
+    return true;
+  }
 
-  setTimeout(boot, 6000);   // ждём, пока игра сама загрузится
+  ['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
+    window.addEventListener(ev, touch, { passive: true, capture: true }));
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) pushSave(true);
+    else setTimeout(() => checkRemote(true), 800);
+  });
+  window.addEventListener('pagehide', () => pushSave(true));
+  window.addEventListener('online', () => { pushSave(false); checkRemote(true); });
+
+  setInterval(() => { if (document.visibilityState === 'visible') checkRemote(); }, 25000);
+  setInterval(() => pushSave(false), 60000);
+
+  setTimeout(() => { hookSave(); boot(); }, 6000);
 
   /* ======================================================================
-     Экран настроек внутри игры
+     Экран в настройках игры
      ====================================================================== */
 
   function popup(text, ms) {
@@ -295,36 +506,9 @@
     console.log(text);
   }
 
-  function icon(name) {
-    return (hasApp() && App.getIcon) ? App.getIcon(name, true) : '';
-  }
-
-  function askServer(onDone) {
+  function askLinkCode(onDone) {
     App.displayPrompt(
-      'Адрес сервера<br><small>вида https://имя.твой-логин.workers.dev</small>',
-      [
-        {
-          name: 'сохранить',
-          onclick: (value) => {
-            const p = popup('Проверяем связь…', 60000);
-            connect(value).then(res => {
-              p && p.close && p.close();
-              popup(res.ok
-                ? 'Сервер подключён. Код для второго устройства: <b>' + ((res.status && res.status.link_code) || '—') + '</b>'
-                : 'Не вышло: ' + res.msg, 6000);
-              if (res.ok && onDone) onDone();
-            });
-          }
-        },
-        { name: 'отмена', class: 'back-btn', onclick: () => {} }
-      ],
-      server()
-    );
-  }
-
-  function askLinkCode() {
-    App.displayPrompt(
-      'Код с первого устройства<br><small>6 символов</small>',
+      'Код с главного устройства<br><small>прогресс отсюда будет заменён</small>',
       [
         {
           name: 'привязать',
@@ -332,10 +516,11 @@
             const p = popup('Проверяем код…', 60000);
             TamaSync.link(value).then(ok => {
               p && p.close && p.close();
-              if (ok) {
-                popup('Устройство привязано. Перезагружаем…', 2000);
-                setTimeout(() => location.reload(), 1800);
-              } else popup('Код не подошёл', 3000);
+              if (!ok) return popup('Код не подошёл', 3000);
+              popup('Привязано. Забираю питомца…', 4000);
+              pullAndApply(true).then(res => {
+                if (!res.ok) { popup(res.msg, 4000); onDone && onDone(); }
+              });
             });
           }
         },
@@ -346,13 +531,11 @@
 
   function showLinkCode(code) {
     App.displayPrompt(
-      'Код для второго устройства<br><small>введи его там в этом же разделе</small>',
+      'Код этого устройства<br><small>введи его на втором — и там будет этот же питомец</small>',
       [
         {
           name: 'копировать',
-          onclick: () => {
-            try { navigator.clipboard.writeText(code); popup('Скопировано', 1500); } catch (e) {}
-          }
+          onclick: () => { try { navigator.clipboard.writeText(code); popup('Скопировано', 1500); } catch (e) {} }
         },
         { name: 'готово', class: 'back-btn', onclick: () => {} }
       ],
@@ -362,50 +545,35 @@
 
   async function openMenu() {
     let st = null, err = null;
-    if (server() && token()) {
-      try { st = (await api('/api/status')).data; }
-      catch (e) { err = e.message; }
-    }
+    try {
+      if (!token()) await ensureAccount();
+      st = (await api('/api/status')).data;
+    } catch (e) { err = e.message; }
     const notif = await notificationState();
+    const online = !err;
 
     let state;
-    if (!server()) state = 'сервер не подключён';
-    else if (err) state = 'нет связи: ' + err;
+    if (err) state = 'нет связи с сервером';
     else if (!enabled()) state = 'синхронизация приостановлена';
     else state = 'сервер на связи' + (st && st.has_save ? ', сохранение есть' : ', сохранения ещё нет');
 
-    const next = predictNextCall();
-    const nextText = next
-      ? new Date(next.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) +
-        ' — ' + next.reason
+    const needs = collectNeeds();
+    const soon = needs[0];
+    const nextText = soon
+      ? new Date(soon.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) +
+        ' — ' + soon.body.toLowerCase()
       : 'пока не о чем напоминать';
-
-    const online = !!server() && !err;
 
     const items = [
       { type: 'info', name: state },
-      {
-        icon: 'server',
-        name: server() ? 'адрес сервера' : 'подключить сервер',
-        onclick: (btn, list) => {
-          askServer(() => { try { list.close(); } catch (e) {} openMenu(); });
-          return true;
-        }
-      },
       {
         _ignore: !online || notif === 'запрещены' || notif === 'нет поддержки',
         icon: 'bell',
         name: 'уведомления: ' + (notif === 'включены' ? 'вкл' : 'выкл'),
         onclick: (btn, list) => {
           const again = () => { try { list.close(); } catch (e) {} openMenu(); };
-          if (notif === 'включены') {
-            disableNotifications().then(r => { popup(r.msg, 2500); again(); });
-          } else {
-            enableNotifications().then(r => {
-              popup(r.msg, r.ok ? 2500 : 6000);
-              again();
-            });
-          }
+          if (notif === 'включены') disableNotifications().then(r => { popup(r.msg, 2500); again(); });
+          else enableNotifications().then(r => { popup(r.msg, r.ok ? 2500 : 6000); again(); });
           return true;
         }
       },
@@ -420,9 +588,14 @@
         name: 'тест уведомления',
         onclick: () => {
           api('/api/test-push', { method: 'POST' })
-            .then(({ data }) => popup(
-              data && data.sent ? 'Отправлено — уведомление должно прийти' :
-              'Подписки нет. Включи уведомления заново.', 5000))
+            .then(({ data }) => {
+              if (!data || !data.total) return popup('Подписки нет. Включи уведомления заново.', 5000);
+              const bad = (data.detail || []).filter(d => !d.ok);
+              popup(bad.length
+                ? 'Служба доставки ответила отказом: ' + bad.map(d => d.status).join(', ')
+                : 'Отправлено, устройств: ' + data.sent + '. Если ничего не появилось — проверь разрешения уведомлений в самой системе.',
+                6000);
+            })
             .catch(e => popup('Ошибка: ' + e.message, 5000));
           return true;
         }
@@ -431,24 +604,24 @@
       {
         _ignore: !online || !st,
         icon: 'link',
-        name: 'код для связи',
+        name: 'мой код',
         onclick: () => { showLinkCode((st && st.link_code) || ''); return true; }
       },
       {
         _ignore: !online,
         icon: 'right-to-bracket',
         name: 'ввести код',
-        onclick: () => { askLinkCode(); return true; }
+        onclick: (btn, list) => {
+          askLinkCode(() => { try { list.close(); } catch (e) {} });
+          return true;
+        }
       },
       { _ignore: !online, type: 'separator' },
       {
         _ignore: !online,
         icon: 'cloud-arrow-up',
         name: 'отправить сейчас',
-        onclick: () => {
-          pushSave(true).then(r => popup(r.msg, 3000));
-          return true;
-        }
+        onclick: () => { pushSave(true).then(r => popup(r.msg, 3000)); return true; }
       },
       {
         _ignore: !online || !st || !st.has_save,
@@ -456,9 +629,9 @@
         name: 'забрать с сервера',
         onclick: () => {
           App.displayConfirm(
-            'Текущий прогресс на этом устройстве будет <b>заменён</b> тем, что лежит на сервере. Продолжить?',
+            'Прогресс на этом устройстве будет <b>заменён</b> тем, что лежит на сервере. Продолжить?',
             [
-              { name: 'да', onclick: () => { applyRemoteSave().then(r => { if (!r.ok) popup(r.msg, 4000); }); } },
+              { name: 'да', onclick: () => { pullAndApply(false).then(r => { if (!r.ok) popup(r.msg, 4000); }); } },
               { name: 'нет', class: 'back-btn', onclick: () => {} }
             ]
           );
@@ -469,10 +642,9 @@
         _ignore: !online || !enabled(),
         type: 'info',
         icon: 'clock',
-        name: 'следующее напоминание: ' + nextText
+        name: 'ближайшее напоминание: ' + nextText
       },
       {
-        _ignore: !server(),
         icon: 'power-off',
         name: enabled() ? 'приостановить' : 'возобновить',
         onclick: (btn, list) => {
@@ -493,7 +665,7 @@
     return App.displayList(items);
   }
 
-  /* ---------- встраиваем пункт в настройки игры ---------- */
+  /* ---------- пункт в настройках игры ---------- */
   function menuItem() {
     return {
       icon: 'cloud',
@@ -536,19 +708,19 @@
 
   let tries = 0;
   const hookTimer = setInterval(() => {
-    if (installMenuHook() || ++tries > 120) clearInterval(hookTimer);
+    installMenuHook();
+    hookSave();
+    if (++tries > 120) clearInterval(hookTimer);
   }, 500);
   installMenuHook();
 
-  /* ---------- ручное управление из консоли ---------- */
+  /* ---------- на случай отладки из консоли ---------- */
   window.TamaSync = {
-    setServer(url) { set(LS.server, String(url || '').replace(/\/+$/, '')); set(LS.on, '1');
-                     console.log('Сервер задан. Перезагрузи страницу.'); },
-    connect,
+    setServer(url) { set(LS.server, String(url || '').replace(/\/+$/, '')); set(LS.on, '1'); },
     async link(code) {
       try {
         const { data } = await api('/api/link', { method: 'POST', body: JSON.stringify({ code: String(code || '').trim() }) });
-        if (data && data.token) { set(LS.token, data.token); set(LS.on, '1'); return true; }
+        if (data && data.token) { set(LS.token, data.token); set(LS.on, '1'); set(LS.hash, ''); return true; }
       } catch (e) { console.warn(e.message); }
       return false;
     },
@@ -557,9 +729,11 @@
     notifications: enableNotifications,
     menu: openMenu,
     push: () => pushSave(true),
-    pull: pullSave,
-    apply: applyRemoteSave,
-    next: predictNextCall,
-    off() { set(LS.on, '0'); console.log('Синхронизация выключена.'); }
+    pull: () => pullAndApply(false),
+    check: checkRemote,
+    needs: collectNeeds,
+    active: () => lastInteraction,
+    off() { set(LS.on, '0'); },
+    on() { set(LS.on, '1'); }
   };
 })();
