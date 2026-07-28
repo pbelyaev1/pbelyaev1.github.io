@@ -232,6 +232,68 @@
   }
 
   /* ======================================================================
+     Значок синхронизации в углу экрана
+     ====================================================================== */
+  let indicatorEl = null, indicatorTimer = null;
+
+  function ensureIndicator() {
+    if (indicatorEl && document.body.contains(indicatorEl)) return indicatorEl;
+    const host = document.querySelector('.graphics-wrapper');
+    if (!host) return null;
+    if (!document.getElementById('tama-sync-style')) {
+      const st = document.createElement('style');
+      st.id = 'tama-sync-style';
+      st.textContent = `
+        .tama-sync-indicator {
+          position: absolute; right: 4px; top: 4px;
+          width: 18px; height: 18px;
+          display: inline-flex; justify-content: center; align-items: center;
+          border-radius: 100%; pointer-events: none; z-index: 999;
+          font-size: 11px; line-height: 1; font-weight: bold; color: #fff;
+          background: rgba(0, 0, 0, .5);
+          opacity: 0; transform: scale(.7);
+          transition: opacity .2s ease, transform .2s ease;
+        }
+        .tama-sync-indicator.on { opacity: .9; transform: scale(1); }
+      `;
+      document.head.appendChild(st);
+    }
+    indicatorEl = document.createElement('div');
+    indicatorEl.className = 'tama-sync-indicator';
+    host.appendChild(indicatorEl);
+    return indicatorEl;
+  }
+
+  /* 'up' — отправляем, 'down' — забираем, 'done' — готово, null — спрятать */
+  /* Простые символы, а не иконочный шрифт: если шрифт не подгрузился,
+     значок всё равно будет виден. */
+  const ICONS = { up: '↑', down: '↓', done: '✓' };
+  let indicatorShownAt = 0;
+
+  function indicator(state) {
+    const el = ensureIndicator();
+    if (!el) return;
+    clearTimeout(indicatorTimer);
+    if (!state) { el.classList.remove('on'); return; }
+
+    // «готово» не проскакивает мгновенно: сначала даём разглядеть саму стрелку
+    if (state === 'done') {
+      const shown = Date.now() - indicatorShownAt;
+      const delay = Math.max(0, 400 - shown);
+      indicatorTimer = setTimeout(() => {
+        el.innerHTML = ICONS.done;
+        el.classList.add('on');
+        indicatorTimer = setTimeout(() => el.classList.remove('on'), 900);
+      }, delay);
+      return;
+    }
+
+    indicatorShownAt = Date.now();
+    el.innerHTML = ICONS[state] || ICONS.up;
+    el.classList.add('on');
+  }
+
+  /* ======================================================================
      Обмен сохранением
      ====================================================================== */
 
@@ -284,6 +346,7 @@
       const { code, hash } = await buildSave();
       if (!force && hash === get(LS.hash)) return { ok: true, msg: 'Изменений нет', skipped: true };
 
+      indicator('up');
       const res = await api('/api/save', {
         method: 'PUT',
         body: JSON.stringify({
@@ -304,8 +367,10 @@
       }
       set(LS.hash, hash);
       lastPushAt = Date.now();
+      indicator('done');
       return { ok: true, msg: 'Отправлено на сервер' };
     } catch (e) {
+      indicator(null);
       return { ok: false, msg: e.message };
     } finally { busy = false; }
   }
@@ -322,6 +387,79 @@
     return JSON.parse(decodeURIComponent(atob(inner)));
   }
 
+  /* ----------------------------------------------------------------------
+     Живое применение состояния — без перезагрузки страницы.
+
+     Игра держит состояние в объектах, которые можно обновить на месте:
+     App.pet.stats и есть App.petDefinition.stats (один и тот же объект),
+     а loadStats дописывает в него данные и заново готовит спрайт. Остальное
+     (настройки, комнаты, мебель, растения, животные, миссии) пересобирается
+     теми же функциями, которыми игра пользуется при обычной загрузке.
+
+     Там, где на месте обновить нельзя — другой питомец, другой спрайт,
+     открытое меню, питомец в отлучке — честно возвращаем false, и вызывающий
+     перезагружает страницу как раньше.
+     ---------------------------------------------------------------------- */
+  function liveBlocker(json) {
+    try {
+      if (!hasApp() || !App.loadingEnded || !App.pet || !App.petDefinition) return 'игра ещё грузится';
+      const inc = json.pet || {};
+      const incStats = inc.stats || {};
+      const cur = App.pet.stats;
+      if (inc.sprite && inc.sprite !== App.petDefinition.sprite) return 'сменился спрайт';
+      if (!!incStats.is_egg !== !!cur.is_egg) return 'яйцо/не яйцо';
+      if (incStats.is_dead && !cur.is_dead) return 'питомец умер';
+      if (cur.current_rabbit_hole && cur.current_rabbit_hole.name) return 'мы в отлучке';
+      if (incStats.current_rabbit_hole && incStats.current_rabbit_hole.name) return 'там в отлучке';
+      if (cur.is_at_parents || cur.is_at_vacation) return 'мы в гостях';
+      if (incStats.is_at_parents || incStats.is_at_vacation) return 'там в гостях';
+      if (App.pet.isDuringScriptedState && App.pet.isDuringScriptedState()) return 'идёт сценка';
+      if (App.currentScene !== App.scene.home) return 'мы не дома';
+      return null;
+    } catch (e) { return 'ошибка проверки: ' + (e.message || e); }
+  }
+
+  function canApplyLive(json) {
+    const blocker = liveBlocker(json);
+    if (blocker) console.log('[sync] на месте нельзя:', blocker);
+    return !blocker;
+  }
+
+  function applyLive(json) {
+    if (!canApplyLive(json)) return false;
+    try {
+      // массивы Object.assign не укорачивает — чистим заранее
+      const inc = json.pet || {};
+      Object.keys(inc).forEach(k => {
+        if (Array.isArray(inc[k]) && Array.isArray(App.petDefinition[k])) App.petDefinition[k].length = 0;
+      });
+      App.pet.loadStats(inc);
+
+      if (json.settings) { Object.assign(App.settings, json.settings); App.applySettings(); }
+      if (json['shell_background_v2.2']) App.setShellBackground(json['shell_background_v2.2']);
+      if (json.records) App.records = json.records;
+      if (json.ingame_events_history) App.gameEventsHistory = json.ingame_events_history;
+      if (json.play_time != null) App.playTime = parseInt(json.play_time, 10) || 0;
+      if (json.user_name != null) App.userName = json.user_name;
+      if (json.user_id != null) App.userId = json.user_id;
+      if (json.furniture) App.ownedFurniture = json.furniture;
+      if (json.plants) App.plants = json.plants.map(p => new Plant(p));
+      if (json.animals) {
+        App.animals = Object.assign({}, json.animals, {
+          list: (json.animals.list || []).map(a => new AnimalDefinition(a))
+        });
+      }
+      if (json.missions && typeof Missions !== 'undefined') Missions.init(json.missions);
+      if (json.room_customization) App.applyRoomCustomizations(json.room_customization);
+      else App.reloadScene(true);
+      if (App.handleFurnitureSpawn) App.handleFurnitureSpawn();
+      return true;
+    } catch (e) {
+      console.warn('[sync] на месте не вышло, перезагружаемся:', e);
+      return false;
+    }
+  }
+
   /* Полная замена состояния тем, что лежит на сервере.
      Свою функцию пишем потому, что штатная App.loadFromJson сбрасывает
      день рождения питомца и выбрасывает имя игрока — для импорта чужого
@@ -334,6 +472,7 @@
     if (!json || typeof json !== 'object' || !json.pet) return { ok: false, msg: 'Сохранение на сервере повреждено' };
 
     applying = true;
+    const originalSave = App.save;
     try {
       App.save = () => {};                              // чтобы игра не переписала то, что кладём
       // Если отправитель обрезал что-то по размеру — не удаляем это у себя
@@ -350,21 +489,39 @@
       const stable = {};
       Object.keys(json).sort().forEach(k => { if (!VOLATILE.includes(k)) stable[k] = json[k]; });
       set(LS.hash, hashString(JSON.stringify(stable)));
-      return { ok: true, msg: 'Загружено с сервера' };
+
+      const live = applyLive(json);
+      if (live) {
+        App.save = originalSave;      // возвращаем сохранение на место
+        hookSave();
+        applying = false;
+        return { ok: true, live: true, msg: 'Обновлено с сервера' };
+      }
+      // на месте не получилось — оставляем сохранение выключенным до перезагрузки
+      return { ok: true, live: false, msg: 'Загружено с сервера' };
     } catch (e) {
+      App.save = originalSave;
       applying = false;
       return { ok: false, msg: 'Не удалось применить: ' + (e.message || e) };
     }
   }
 
   async function pullAndApply(silent) {
-    const { data } = await api('/api/save');
-    const res = await applyRemote(data);
+    indicator('down');
+    let data, res;
+    try {
+      data = (await api('/api/save')).data;
+      res = await applyRemote(data);
+    } catch (e) {
+      indicator(null);
+      throw e;
+    }
     if (res.ok && data && data.hash) set(LS.hash, data.hash);
+    if (res.ok && res.live) { indicator('done'); return res; }
     if (res.ok) {
       if (!silent) popup('Забираю прогресс с другого устройства…', 2000);
       setTimeout(() => location.reload(), silent ? 400 : 1200);
-    }
+    } else indicator(null);
     return res;
   }
 
@@ -846,6 +1003,7 @@
     check: checkRemote,
     needs: collectNeeds,
     diag: openDiagnostics,
+    why: liveBlocker,
     active: () => lastInteraction,
     off() { set(LS.on, '0'); },
     on() { set(LS.on, '1'); }
