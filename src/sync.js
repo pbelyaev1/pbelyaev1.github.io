@@ -154,6 +154,12 @@
     let hunger = s.current_hunger, fun = s.current_fun, sleep = s.current_sleep,
         bladder = s.current_bladder, clean = s.current_cleanliness, health = s.current_health,
         poop = s.has_poop_out || 0;
+    /* Спящего питомца нельзя ни покормить, ни поиграть с ним: игра на это время
+       отключает управление. Пока он спит — молчим, иначе получается «проголодался»
+       про питомца, которого сам же уложил. */
+    let sleeping = !!s.is_sleeping;
+    const sleepMax = s.max_sleep || 100;
+    const replenish = s.sleep_replenish_rate || 0.1;
 
     if (s.is_misbehaving) mark('misbehave', now);
 
@@ -164,10 +170,12 @@
       const mult = night ? 0.05 : 0.25;          // игра закрыта
       const dt = STEP_SEC;
 
-      if (hunger <= T.hunger) mark('hunger', at);
-      if (fun <= T.fun) mark('fun', at);
-      if (!night && sleep <= T.sleep) mark('sleep', at);
-      if (bladder <= T.toilet) mark('toilet', at);
+      if (!sleeping) {
+        if (hunger <= T.hunger) mark('hunger', at);
+        if (fun <= T.fun) mark('fun', at);
+        if (!night && sleep <= T.sleep) mark('sleep', at);
+        if (bladder <= T.toilet) mark('toilet', at);
+      }
       if (poop > 0) mark('poop', at);
       if (clean <= T.clean) mark('clean', at);
       if (health <= T.sick) mark('sick', at);
@@ -177,8 +185,16 @@
       hunger = Math.max(0, hunger - r.hunger * mult * dt);
       fun    = Math.max(0, fun    - r.fun    * mult * dt);
       clean  = Math.max(0, clean  - r.clean  * mult * dt);
-      if (night) sleep = Math.min(s.max_sleep || 100, sleep + (s.sleep_replenish_rate || 0.1) * 2 * dt);
-      else       sleep = Math.max(0, sleep - r.sleep * mult * dt);
+
+      if (sleeping) {
+        sleep = Math.min(sleepMax, sleep + replenish * (night ? 2 : 1) * dt);
+        if (sleep >= sleepMax && !night) sleeping = false;      // выспался и проснулся
+      } else if (night) {
+        sleeping = true;                                        // ночью укладывается сам
+      } else {
+        sleep = Math.max(0, sleep - r.sleep * mult * dt);
+        if (sleep <= 0) sleeping = true;                        // свалился от усталости
+      }
 
       bladder -= r.bladder * mult * dt;
       if (bladder <= 0) {
@@ -196,12 +212,19 @@
     return finish(found, name, now);
   }
 
+  /* Если потребность уже назрела в момент, когда игру закрывали, напоминать
+     сразу же незачем — человек только что всё видел сам. Даём отсрочку. */
+  const GRACE = { danger: 5 * 60_000, sick: 15 * 60_000, poop: 25 * 60_000 };
+  const GRACE_DEFAULT = 40 * 60_000;
+
   function finish(found, name, now) {
     return Object.keys(found).map(key => {
       const t = NEED_TEXT[key] || { title: '{name} зовёт', body: 'Кажется, ему что-то нужно' };
+      let at = found[key];
+      if (at <= now + 1000) at = now + (GRACE[key] != null ? GRACE[key] : GRACE_DEFAULT);
       return {
         key,
-        at: shiftFromNight(Math.max(found[key], now)),
+        at: shiftFromNight(at),
         title: t.title.replace('{name}', name),
         body: t.body
       };
@@ -555,6 +578,44 @@
     );
   }
 
+  const STAT_NAMES = [
+    ['current_hunger', 'max_hunger', 'сытость'],
+    ['current_fun', 'max_fun', 'настроение'],
+    ['current_sleep', 'max_sleep', 'бодрость'],
+    ['current_bladder', 'max_bladder', 'туалет'],
+    ['current_cleanliness', 'max_cleanliness', 'чистота'],
+    ['current_health', 'max_health', 'здоровье'],
+  ];
+
+  function openDiagnostics() {
+    const s = hasApp() && App.pet && App.pet.stats;
+    if (!s) return App.displayList([{ type: 'info', name: 'питомец ещё не загрузился' }]);
+
+    const rows = STAT_NAMES.map(([cur, max, label]) => {
+      const v = Math.round((s[cur] / (s[max] || 100)) * 100);
+      return label + ': <b>' + v + '%</b>';
+    });
+    rows.push('спит: <b>' + (s.is_sleeping ? 'да' : 'нет') + '</b>');
+    if (s.has_poop_out) rows.push('какашек: <b>' + s.has_poop_out + '</b>');
+    if (s.is_misbehaving) rows.push('<b>балуется</b>');
+
+    const needs = collectNeeds();
+    const when = at => {
+      const m = Math.round((at - Date.now()) / 60000);
+      if (m <= 0) return 'сейчас';
+      if (m < 60) return 'через ' + m + ' мин';
+      return 'через ' + (m / 60).toFixed(1) + ' ч';
+    };
+
+    return App.displayList([
+      { type: 'info', name: rows.join('<br>') },
+      { type: 'separator' },
+      needs.length
+        ? { type: 'info', icon: 'bell', name: needs.map(n => n.body.toLowerCase() + ' — ' + when(n.at)).join('<br>') }
+        : { type: 'info', icon: 'bell', name: 'напоминаний не запланировано' }
+    ]);
+  }
+
   async function openMenu() {
     let st = null, err = null;
     try {
@@ -655,6 +716,11 @@
         type: 'info',
         icon: 'clock',
         name: 'ближайшее напоминание: ' + nextText
+      },
+      {
+        icon: 'heart-pulse',
+        name: 'что с питомцем',
+        onclick: () => { openDiagnostics(); return true; }
       },
       {
         icon: 'power-off',
@@ -779,6 +845,7 @@
     pull: () => pullAndApply(false),
     check: checkRemote,
     needs: collectNeeds,
+    diag: openDiagnostics,
     active: () => lastInteraction,
     off() { set(LS.on, '0'); },
     on() { set(LS.on, '1'); }
