@@ -54,7 +54,7 @@
     return null;
   }
 
-  function lookup(raw) {
+  function lookup(raw, collect) {
     const s = norm(raw);
     if (!s || s.length > 400) return null;
     if (!/[A-Za-z]/.test(s)) return null;          // уже русский / только цифры
@@ -87,8 +87,35 @@
     if (byPattern != null) return byPattern;
 
     // не нашли — копим для дословаря
-    if (/[a-z]{2}/.test(s)) missing.set(s, (missing.get(s) || 0) + 1);
+    if (collect !== false && /[a-z]{2}/.test(s)) missing.set(s, (missing.get(s) || 0) + 1);
     return null;
+  }
+
+  /* ---- целые предложения, разорванные тегами ----
+     Игра пишет «Your browser may <b>delete</b> it unexpectedly.» — браузер видит
+     три отдельных куска текста, и по отдельности они не переводятся.
+     Здесь мы берём элемент целиком, сверяем его текст со словарём и,
+     если нашли, заменяем содержимое переводом. Жирность внутри теряется,
+     но фраза становится связной.                                          */
+  const INLINE_OK = new Set(['B','I','U','EM','STRONG','BR','SPAN','SMALL','FONT','LABEL','P','SUP','SUB']);
+  function isSimpleBlock(el) {
+    if (el.__i18nBlock) return false;
+    if (el.querySelector('button,input,canvas,img,svg,select,textarea,a,video')) return false;
+    const kids = el.querySelectorAll('*');
+    if (!kids.length) return false;                 // без тегов внутри — обычный текстовый узел
+    for (const d of kids) if (!INLINE_OK.has(d.tagName)) return false;
+    return true;
+  }
+  function translateBlock(el) {
+    if (!isSimpleBlock(el)) return false;
+    const txt = norm(el.textContent || '');
+    if (!txt || txt.length > 320) return false;
+    if (!/[A-Za-z]{3}/.test(txt)) return false;
+    const hit = lookup(txt, false);
+    if (hit == null) return false;
+    el.textContent = hit;
+    el.__i18nBlock = true;
+    return true;
   }
 
   /* ---- перевод одного текстового узла ---- */
@@ -131,6 +158,15 @@
     if (root.nodeType !== 1) return;
     if (SKIP_TAGS.has(root.nodeName)) return;
     translateAttrs(root);
+
+    // сначала целые предложения — иначе куски переведутся по отдельности
+    // и склеить их обратно будет уже нечем
+    translateBlock(root);
+    if (root.querySelectorAll) {
+      const blocks = root.querySelectorAll('*');
+      for (let i = 0; i < blocks.length; i++) translateBlock(blocks[i]);
+    }
+
     const it = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
     const list = [];
     let n;
