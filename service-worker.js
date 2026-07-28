@@ -186,3 +186,29 @@ async function cacheInBatches(cache, assets, batchSize = 20) {
     );
   }
 }
+
+/* ---------- уведомления от питомца (добавлено русификацией/синхронизацией) ---------- */
+self.addEventListener('push', event => {
+  let d = { title: 'Питомец зовёт', body: 'Кажется, ему что-то нужно' };
+  try { if (event.data) d = { ...d, ...event.data.json() }; } catch (e) {
+    try { d.body = event.data.text(); } catch (e2) {}
+  }
+  event.waitUntil(self.registration.showNotification(d.title, {
+    body: d.body,
+    icon: 'android-icon-192x192.png',
+    badge: 'favicon-32x32.png',
+    tag: d.tag || 'pet',
+    renotify: true,
+    data: { url: d.url || './' }
+  }));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || './';
+  event.waitUntil((async () => {
+    const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of all) { if ('focus' in c) return c.focus(); }
+    if (clients.openWindow) return clients.openWindow(target);
+  })());
+});
