@@ -54,32 +54,37 @@
     return null;
   }
 
-  function lookup(raw, collect) {
-    const s = norm(raw);
-    if (!s || s.length > 400) return null;
-    if (!/[A-Za-z]/.test(s)) return null;          // уже русский / только цифры
+  /* Игра сама режет длинные подписи и дописывает многоточие: "gameplay settin\u2026".
+     Точного совпадения у обрубка быть не может, поэтому ищем ключ,
+     который начинается так же. Берём самый короткий подходящий —
+     он почти всегда и есть исходная подпись.                              */
+  const keysLower = Object.keys(DICT).map(k => [k.toLowerCase(), k]).sort();
+  const prefixCache = new Map();
+  function prefixMatch(base) {
+    const b = base.toLowerCase();
+    if (b.length < 4) return null;
+    if (prefixCache.has(b)) return prefixCache.get(b);
+    // Кандидатов может быть несколько ("underworld tickets" и "Underworld Entrance").
+    // Сначала предпочитаем совпадение по регистру первой буквы — подписи меню
+    // пишутся так же, как в исходнике. При равенстве берём более короткий ключ.
+    const upper = /^[A-Z]/.test(base);
+    let best = null, bestScore = -Infinity;
+    for (let i = 0; i < keysLower.length; i++) {
+      const kl = keysLower[i][0];
+      if (kl.length <= b.length || kl.indexOf(b) !== 0) continue;
+      const orig = keysLower[i][1];
+      const score = (/^[A-Z]/.test(orig) === upper ? 1000 : 0) - kl.length;
+      if (score > bestScore) { bestScore = score; best = keysLower[i]; }
+    }
+    const res = best ? DICT[best[1]] : null;
+    prefixCache.set(b, res);
+    return res;
+  }
 
+  function lookupCore(s) {
     if (DICT[s] != null) return DICT[s];
     const l = s.toLowerCase();
     if (lower[l] != null) return lower[l];
-
-    // игра обрезает длинные пункты многоточием: "past generation…"
-    const m = s.match(/^(.*?)(\s*(?:\u2026|\.\.\.))$/);
-    if (m) {
-      const base = m[1].trim();
-      const hit = DICT[base] != null ? DICT[base] : lower[base.toLowerCase()];
-      if (hit != null) return hit + m[2];
-    }
-
-    // пункты вида "#1 HOME", "#4 GAME CENTER" — номер отдельно, название переводим
-    const num = s.match(/^(#\s*\d+[.)]?\s+)(.+)$/);
-    if (num) {
-      const rest = num[2].trim();
-      const hit = DICT[rest] != null ? DICT[rest] : lower[rest.toLowerCase()];
-      if (hit != null) return num[1] + hit;
-    }
-
-    // с числами
     const nk = numKey(s);
     if (nk !== s) {
       const hit = DICT[nk] != null ? DICT[nk] : lower[nk.toLowerCase()];
@@ -89,10 +94,34 @@
         return hit.replace(/\{n\}/g, () => nums[i++] ?? '');
       }
     }
+    return matchPattern(s);
+  }
 
-    // фразы с подставленными именами и числами
-    const byPattern = matchPattern(s);
-    if (byPattern != null) return byPattern;
+  function lookup(raw, collect) {
+    const s = norm(raw);
+    if (!s || s.length > 400) return null;
+    if (!/[A-Za-z]/.test(s)) return null;          // уже русский / только цифры
+
+    const direct = lookupCore(s);
+    if (direct != null) return direct;
+
+    // снимаем номер в начале ("#12 ") и многоточие в конце — они мешают поиску
+    let head = '', body = s;
+    const num = body.match(/^(#\s*\d+[.)]?\s+)(.+)$/);
+    if (num) { head = num[1]; body = num[2]; }
+    let cut = false;
+    const ell = body.match(/^(.*?)\s*(?:\u2026|\.\.\.)$/);
+    if (ell) { body = ell[1].trim(); cut = true; }
+
+    if (head || cut) {
+      const hit = lookupCore(body);
+      if (hit != null) return head + hit;      // перевод целый — многоточие ни к чему
+      // обрубок слова: ищем ключ по началу и подставляем подпись целиком
+      if (cut) {
+        const p = prefixMatch(body);
+        if (p != null) return head + p;
+      }
+    }
 
     // не нашли — копим для дословаря
     if (collect !== false && /[a-z]{2}/.test(s)) missing.set(s, (missing.get(s) || 0) + 1);
