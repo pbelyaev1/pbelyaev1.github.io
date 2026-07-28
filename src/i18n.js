@@ -53,6 +53,8 @@
         // то, что игра подставила внутрь фразы, тоже может требовать перевода
         const t = piece && piece.trim();
         if (t) {
+          const dur = duration(t);
+          if (dur != null) return piece.replace(t, dur);
           const hit = DICT[t] != null ? DICT[t] : lower[t.toLowerCase()];
           if (hit != null) return piece.replace(t, hit);
         }
@@ -106,10 +108,39 @@
     return matchPattern(s);
   }
 
+  /* ---------- время: правильные окончания ----------
+     Игра собирает такие подписи руками: `${n} minute${n !== 1 ? 's' : ''}`.
+     Словарём это не покрыть — по-русски у числительных три формы. */
+  const UNITS = {
+    second: ['секунда', 'секунды', 'секунд'],
+    minute: ['минута', 'минуты', 'минут'],
+    hour:   ['час', 'часа', 'часов'],
+    day:    ['день', 'дня', 'дней'],
+    week:   ['неделя', 'недели', 'недель'],
+    month:  ['месяц', 'месяца', 'месяцев'],
+    year:   ['год', 'года', 'лет'],
+  };
+  function plural(n, forms) {
+    const ones = n % 10, tens = n % 100;
+    if (ones === 1 && tens !== 11) return forms[0];
+    if (ones >= 2 && ones <= 4 && (tens < 12 || tens > 14)) return forms[1];
+    return forms[2];
+  }
+  function duration(s) {
+    let m = s.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?$/i);
+    if (m) return m[1] + ' ' + plural(+m[1], UNITS[m[2].toLowerCase()]);
+    m = s.match(/^(\d+)\s+hours?\s+and\s+(\d+)\s+minutes?$/i);
+    if (m) return m[1] + ' ' + plural(+m[1], UNITS.hour) + ' и ' + m[2] + ' ' + plural(+m[2], UNITS.minute);
+    return null;
+  }
+
   function lookup(raw, collect) {
     const s = norm(raw);
     if (!s || s.length > 400) return null;
     if (!/[A-Za-z]/.test(s)) return null;          // уже русский / только цифры
+
+    const dur = duration(s);
+    if (dur != null) return dur;
 
     const direct = lookupCore(s);
     if (direct != null) return direct;
