@@ -213,12 +213,23 @@
      ====================================================================== */
 
   const VOLATILE = ['last_time', 'play_time'];   // меняются сами, на них реагировать не надо
+  const MAX_SAVE = 3_500_000;                   // сервер принимает до 4 МБ
+
+  /* Штатный App.getSaveCode выбрасывает оформление корпуса и моды — чтобы код
+     сохранения, который пересылают руками, не разрастался. Нам пересылать
+     руками ничего не надо, поэтому кладём всё; крупное отсекаем по размеру. */
+  function encodeSave(obj) {
+    return 'save:' + btoa(encodeURIComponent(JSON.stringify(obj))) + ':endsave';
+  }
 
   async function buildSave() {
     const storage = await App.getDBItems();
-    const code = await App.getSaveCode(storage);
+    const full = Object.assign({}, storage);
+    let code = encodeSave(full);
+    if (code.length > MAX_SAVE) { delete full.mods; code = encodeSave(full); }
+    if (code.length > MAX_SAVE) { delete full['shell_background_v2.2']; code = encodeSave(full); }
     const stable = {};
-    Object.keys(storage).sort().forEach(k => { if (!VOLATILE.includes(k)) stable[k] = storage[k]; });
+    Object.keys(full).sort().forEach(k => { if (!VOLATILE.includes(k)) stable[k] = full[k]; });
     return { code, hash: hashString(JSON.stringify(stable)) };
   }
 
@@ -302,7 +313,8 @@
     applying = true;
     try {
       App.save = () => {};                              // чтобы игра не переписала то, что кладём
-      const keep = ['mods', 'shell_background_v2.2'];   // эти не сериализуются, оставляем свои
+      // Если отправитель обрезал что-то по размеру — не удаляем это у себя
+      const keep = ['mods', 'shell_background_v2.2'];
       const incoming = Object.keys(json);
       for (const key of incoming) await window.idbKeyval.set(key, json[key]);
       for (const key of await window.idbKeyval.keys()) {
@@ -665,6 +677,41 @@
     return App.displayList(items);
   }
 
+  /* ======================================================================
+     Чистка лишнего
+
+     Промо-окна оригинальной игры (Discord, оценка, «вышло обновление») и
+     предупреждение «сохранение под угрозой» больше не нужны: состояние лежит
+     на сервере. Правим не исходники игры, а поведение — так обновления
+     оригинального проекта продолжат накатываться поверх без конфликтов.
+     ====================================================================== */
+  const NOISY_EVENT = /(notice|discord|rating_dialog|poll|sales_day|newsletter)/i;
+
+  function hookNotices() {
+    if (!hasApp()) return false;
+    // предупреждение о хрупком хранилище: и правда просим браузер не удалять
+    try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+    App.isStoragePersistent = true;
+    if (App.temp) App.temp.showStoragePersistentBadge = false;
+
+    if (typeof App.addEvent !== 'function' || App.addEvent.__tamaSync) return true;
+    const orig = App.addEvent;
+    const wrapped = function (name) {
+      if (NOISY_EVENT.test(String(name))) return false;   // окно просто не показываем
+      return orig.apply(this, arguments);
+    };
+    wrapped.__tamaSync = true;
+    App.addEvent = wrapped;
+    return true;
+  }
+
+  /* успеть до того, как игра решит показать окно после загрузки */
+  const noticeTimer = setInterval(hookNotices, 50);
+  setTimeout(() => clearInterval(noticeTimer), 20000);
+  hookNotices();
+
+  const DROP_FROM_SETTINGS = /(save data is at risk|сохранение под угрозой|manual save|ручное сохранение)/i;
+
   /* ---------- пункт в настройках игры ---------- */
   function menuItem() {
     return {
@@ -675,7 +722,7 @@
   }
 
   function inject(items) {
-    const copy = items.slice();
+    const copy = items.filter(it => !(typeof it.name === 'string' && DROP_FROM_SETTINGS.test(it.name)));
     let at = copy.findIndex(it => typeof it.name === 'string' && /save management|управление сохранени/i.test(it.name));
     if (at === -1) at = copy.findIndex(it => typeof it.name === 'string' && /manual save|сохранить вручную/i.test(it.name));
     copy.splice(at === -1 ? 0 : at + 1, 0, menuItem());
