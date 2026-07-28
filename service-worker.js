@@ -32,6 +32,11 @@ const ASSETS = [
   "src/StoryGen.js",
   "src/Plant.js",
   "src/Animal.js",
+  // русификация и синхронизация
+  "resources/data/ru.js",
+  "src/i18n.js",
+  "src/sync.js",
+  "resources/font/PixelifySans-RU.ttf",
   // libs
   "src/libs/moment.js",
   "src/libs/idb-keyval.js",
