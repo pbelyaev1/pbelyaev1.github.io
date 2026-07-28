@@ -31,6 +31,29 @@
   const lower = {};
   for (const k in DICT) lower[k.toLowerCase()] = DICT[k];
 
+  /* ---- шаблоны с подстановками ----
+     Ключ "{*} съел {*}" ловит любую фразу, куда игра подставила имя или предмет.
+     Захваченные куски переносятся в перевод в том же порядке.            */
+  const RX_ESC = /[.*+?^${}()|[\]\\]/g;
+  const patterns = [];
+  for (const k in DICT) {
+    if (k.indexOf('{*}') === -1) continue;
+    const rx = new RegExp('^' + k.split('{*}').map(s => s.replace(RX_ESC, '\\$&')).join('([\\s\\S]*?)') + '$');
+    patterns.push({ rx, out: DICT[k], len: k.length });
+  }
+  patterns.sort((a, b) => b.len - a.len);   // сначала самые конкретные
+
+  function matchPattern(s) {
+    for (let i = 0; i < patterns.length; i++) {
+      const m = s.match(patterns[i].rx);
+      if (!m) continue;
+      let n = 1;
+      const res = patterns[i].out.replace(/\{\*\}/g, () => m[n++] ?? '');
+      if (res !== s) return res;
+    }
+    return null;
+  }
+
   function lookup(raw) {
     const s = norm(raw);
     if (!s || s.length > 400) return null;
@@ -58,6 +81,10 @@
         return hit.replace(/\{n\}/g, () => nums[i++] ?? '');
       }
     }
+
+    // фразы с подставленными именами и числами
+    const byPattern = matchPattern(s);
+    if (byPattern != null) return byPattern;
 
     // не нашли — копим для дословаря
     if (/[a-z]{2}/.test(s)) missing.set(s, (missing.get(s) || 0) + 1);

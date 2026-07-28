@@ -2835,7 +2835,7 @@ const App = {
         show_set_username_dialog: function(){
             const validate = (username) => {
                 if(!username) return false;
-                const regex = /^[a-zA-Z0-9]+$/;
+                const regex = /^[a-zA-Z0-9\u0400-\u04FF]+$/;   // РУСИФИКАЦИЯ: разрешена кириллица
                 return username.match(regex) !== null;
             }
 
