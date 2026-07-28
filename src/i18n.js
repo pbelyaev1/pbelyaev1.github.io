@@ -114,6 +114,13 @@
     const direct = lookupCore(s);
     if (direct != null) return direct;
 
+    // подписи предметов приходят с количеством: "rattle (x1)", "milk (x\u221E)"
+    const qty = s.match(/^(.*\S)\s*(\((?:x|\u00D7)\s*[\d\u221E]+\))$/i);
+    if (qty) {
+      const hit = lookupCore(qty[1]);
+      if (hit != null) return hit + ' ' + qty[2];
+    }
+
     // подписи настроек приходят с двоеточием: "auto aging:"
     const colon = s.match(/^(.*\S)\s*:$/);
     if (colon) {
