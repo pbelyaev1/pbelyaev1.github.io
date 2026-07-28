@@ -48,7 +48,16 @@
       const m = s.match(patterns[i].rx);
       if (!m) continue;
       let n = 1;
-      const res = patterns[i].out.replace(/\{\*\}/g, () => m[n++] ?? '');
+      const res = patterns[i].out.replace(/\{\*\}/g, () => {
+        const piece = m[n++] ?? '';
+        // то, что игра подставила внутрь фразы, тоже может требовать перевода
+        const t = piece && piece.trim();
+        if (t) {
+          const hit = DICT[t] != null ? DICT[t] : lower[t.toLowerCase()];
+          if (hit != null) return piece.replace(t, hit);
+        }
+        return piece;
+      });
       if (res !== s) return res;
     }
     return null;
@@ -104,6 +113,13 @@
 
     const direct = lookupCore(s);
     if (direct != null) return direct;
+
+    // подписи настроек приходят с двоеточием: "auto aging:"
+    const colon = s.match(/^(.*\S)\s*:$/);
+    if (colon) {
+      const hit = lookupCore(colon[1]);
+      if (hit != null) return hit + ':';
+    }
 
     // снимаем номер в начале ("#12 ") и многоточие в конце — они мешают поиску
     let head = '', body = s;
