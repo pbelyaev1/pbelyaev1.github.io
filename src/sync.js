@@ -86,17 +86,19 @@
   const HORIZON_HOURS = 72;
   const STEP_SEC = 60;
 
+  /* short — для случая, когда назрело несколько дел сразу: тогда сервер
+     соберёт из них одно уведомление, а не пришлёт четыре подряд. */
   const NEED_TEXT = {
-    hunger:     { title: '{name} проголодался',        body: 'Пора покормить' },
-    fun:        { title: '{name} скучает',             body: 'Хочет поиграть' },
-    sleep:      { title: '{name} хочет спать',         body: 'Пора выключить свет' },
-    toilet:     { title: '{name} просится в туалет',   body: 'Отведи его' },
-    poop:       { title: 'У {name} грязно',            body: 'Надо убрать' },
-    clean:      { title: '{name} испачкался',          body: 'Пора помыть' },
-    sick:       { title: '{name} заболел',             body: 'Нужно лекарство' },
-    danger:     { title: '{name} совсем плохо!',       body: 'Срочно зайди в игру' },
-    misbehave:  { title: '{name} балуется',            body: 'Стоит поругать' },
-    egg:        { title: 'Яйцо шевелится',             body: 'Кажется, скоро вылупится' },
+    hunger:     { title: '{name} проголодался',      body: 'Пора покормить',        short: 'голоден' },
+    fun:        { title: '{name} скучает',           body: 'Хочет поиграть',        short: 'скучает' },
+    sleep:      { title: '{name} хочет спать',       body: 'Пора выключить свет',   short: 'хочет спать' },
+    toilet:     { title: '{name} просится в туалет', body: 'Отведи его',            short: 'просится в туалет' },
+    poop:       { title: 'У {name} грязно',          body: 'Надо убрать',           short: 'надо убрать' },
+    clean:      { title: '{name} испачкался',        body: 'Пора помыть',           short: 'надо помыть' },
+    sick:       { title: '{name} заболел',           body: 'Нужно лекарство',       short: 'заболел' },
+    danger:     { title: '{name} совсем плохо!',     body: 'Срочно зайди в игру',   short: 'совсем плохо' },
+    misbehave:  { title: '{name} балуется',          body: 'Стоит поругать',        short: 'балуется' },
+    egg:        { title: 'Яйцо шевелится',           body: 'Кажется, скоро вылупится', short: 'яйцо шевелится' },
   };
 
   function isSleepHourAt(date) {
@@ -227,7 +229,8 @@
         key,
         at: shiftFromNight(at),
         title: t.title.replace('{name}', name),
-        body: t.body
+        body: t.body,
+        short: t.short || t.body
       };
     }).sort((a, b) => a.at - b.at);
   }
@@ -416,6 +419,7 @@
           hash,
           last_time: Date.now(),
           device: deviceId(),
+          tz: -new Date().getTimezoneOffset(),   // сдвиг от UTC в минутах — сервер молчит по ночам
           active: lastInteraction,
           seen: document.visibilityState === 'visible' ? Date.now() : 0,
           needs: collectNeeds(),
@@ -806,7 +810,26 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  function openDiagnostics() {
+  const SERVER_VERSION = 3;     // такую версию воркера ждёт этот клиент
+
+  function ago(ms) {
+    if (!ms) return 'никогда';
+    const m = Math.round((Date.now() - ms) / 60000);
+    if (m < 1) return 'только что';
+    if (m < 60) return m + ' мин назад';
+    const h = m / 60;
+    if (h < 24) return h.toFixed(1) + ' ч назад';
+    return Math.round(h / 24) + ' дн назад';
+  }
+  function when(at) {
+    const m = Math.round((at - Date.now()) / 60000);
+    if (m <= 0) return 'уже пора';
+    if (m < 60) return 'через ' + m + ' мин';
+    if (m < 24 * 60) return 'через ' + (m / 60).toFixed(1) + ' ч';
+    return new Date(at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
+  async function openDiagnostics() {
     const s = hasApp() && App.pet && App.pet.stats;
     if (!s) return App.displayList([{ type: 'info', name: 'питомец ещё не загрузился' }]);
 
@@ -819,20 +842,38 @@
     if (s.is_misbehaving) rows.push('<b>балуется</b>');
 
     const needs = collectNeeds();
-    const when = at => {
-      const m = Math.round((at - Date.now()) / 60000);
-      if (m <= 0) return 'сейчас';
-      if (m < 60) return 'через ' + m + ' мин';
-      return 'через ' + (m / 60).toFixed(1) + ' ч';
-    };
 
-    return App.displayList([
-      { type: 'info', name: rows.join('<br>') },
-      { type: 'separator' },
-      needs.length
-        ? { type: 'info', icon: 'bell', name: needs.map(n => n.body.toLowerCase() + ' — ' + when(n.at)).join('<br>') }
-        : { type: 'info', icon: 'bell', name: 'напоминаний не запланировано' }
-    ]);
+    let st = null, err = null;
+    try { st = (await api('/api/status')).data; } catch (e) { err = e.message; }
+
+    const items = [{ type: 'info', name: rows.join('<br>') }];
+
+    if (err) {
+      items.push({ type: 'info', icon: 'triangle-exclamation', name: 'сервер недоступен: ' + err });
+    } else if (!st || !st.v || st.v < SERVER_VERSION) {
+      items.push({
+        type: 'info', icon: 'triangle-exclamation',
+        name: '<b>На Cloudflare старая версия сервера.</b> Уведомления не будут приходить, пока не заменишь код воркера на свежий и не нажмёшь Deploy.'
+      });
+    } else {
+      const cron = st.cron_at
+        ? 'расписание: работало ' + ago(st.cron_at)
+        : '<b>расписание ни разу не запускалось</b> — проверь Cron Trigger в настройках воркера';
+      items.push({
+        type: 'info', icon: 'server',
+        name: cron +
+              '<br>последнее уведомление: ' + ago(st.last_notify) +
+              '<br>за сегодня: ' + (st.notify_today || 0) + ' из 8' +
+              (st.next_call_at ? '<br>следующая проверка: ' + when(st.next_call_at) : '')
+      });
+    }
+
+    items.push({ type: 'separator' });
+    items.push(needs.length
+      ? { type: 'info', icon: 'bell', name: needs.map(n => n.body.toLowerCase() + ' — ' + when(n.at)).join('<br>') }
+      : { type: 'info', icon: 'bell', name: 'напоминаний не запланировано' });
+
+    return App.displayList(items);
   }
 
   async function openMenu() {
@@ -844,8 +885,11 @@
     const notif = await notificationState();
     const online = !err;
 
+    const outdated = !err && (!st || !st.v || st.v < SERVER_VERSION);
+
     let state;
     if (err) state = 'нет связи с сервером';
+    else if (outdated) state = 'на Cloudflare старая версия сервера — уведомления не работают';
     else if (!enabled()) state = 'синхронизация приостановлена';
     else state = 'сервер на связи' + (st && st.has_save ? ', сохранение есть' : ', сохранения ещё нет');
 
