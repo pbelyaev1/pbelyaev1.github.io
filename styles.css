@@ -311,6 +311,15 @@
     unicode-range: U+221E;
 }
 
+/* --- РУСИФИКАЦИЯ: кириллица тем же пиксельным шрифтом, что и латиница.
+   В PixelColeco кириллицы нет, поэтому подмешиваем Pixelify Sans
+   только на диапазон кириллицы. Латиница не меняется. --- */
+@font-face {
+    font-family: 'Pixel';
+    src: url('resources/font/PixelifySans-VariableFont_wght.ttf');
+    unicode-range: U+0400-04FF, U+2116;
+}
+
 * {
     -webkit-tap-highlight-color: transparent;
     user-select: none;
