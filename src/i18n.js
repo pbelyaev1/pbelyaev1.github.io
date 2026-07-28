@@ -71,6 +71,14 @@
       if (hit != null) return hit + m[2];
     }
 
+    // пункты вида "#1 HOME", "#4 GAME CENTER" — номер отдельно, название переводим
+    const num = s.match(/^(#\s*\d+[.)]?\s+)(.+)$/);
+    if (num) {
+      const rest = num[2].trim();
+      const hit = DICT[rest] != null ? DICT[rest] : lower[rest.toLowerCase()];
+      if (hit != null) return num[1] + hit;
+    }
+
     // с числами
     const nk = numKey(s);
     if (nk !== s) {
