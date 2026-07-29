@@ -889,7 +889,14 @@ class Pet extends Object2d {
 
         let stats = this.stats;
         const previousStats = Object.assign({}, this.stats);
-        const { hasTrait } = this.petDefinition;
+        /* НАША ПРАВКА: черты характера снова работают.
+           Было: const { hasTrait } = this.petDefinition;
+           При таком разборе метод отрывался от своего объекта, внутри него
+           this оказывался пустым, и hasTrait ВСЕГДА возвращал undefined —
+           то есть все черты, которые проверяются в этой функции (множители
+           расхода и пороги «ворчуна»), молча не действовали. Ошибка тянется
+           из оригинального Tamaweb. Зовём метод у объекта — и всё оживает. */
+        const hasTrait = (key) => this.petDefinition.hasTrait(key);
 
         let depletion_mult = 1, offlineAndIsNight = false;
         if(isOfflineProgression){
