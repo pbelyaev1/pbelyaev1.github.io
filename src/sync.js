@@ -22,12 +22,17 @@
     active: 'tama_sync_last_active',
     sound:  'tama_sound_in_silent',
     on:     'tama_sync_enabled',
+    reset:  'tama_reset_pending',   // «питомца сбросили, сервер об этом знает не наверняка»
   };
   const get = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
   const set = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+  const drop = k => { try { localStorage.removeItem(k); } catch (e) {} };
 
   const server = () => (get(LS.server) || SYNC_SERVER || '').replace(/\/+$/, '');
-  const token  = () => get(LS.token);
+  /* Полный сброс стирает localStorage целиком, а сказать серверу «забудь меня»
+     надо уже после этого — поэтому держим последний токен ещё и в памяти. */
+  let lastToken = null;
+  const token  = () => { const t = get(LS.token); if (t) lastToken = t; return t; };
   const enabled = () => !!server() && get(LS.on) !== '0';
 
   const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -504,6 +509,7 @@
   }
 
   async function pushSave(force) {
+    if (resetting) return { ok: false, msg: 'Идёт сброс питомца' };
     if (!enabled() || applying) return { ok: false, msg: 'Синхронизация выключена' };
     if (!hasApp() || !App.pet || !App.loadingEnded) return { ok: false, msg: 'Игра ещё не загрузилась' };
     if (busy) return { ok: false, msg: 'Уже отправляем' };
@@ -551,6 +557,7 @@
   }
 
   function schedulePush() {
+    if (resetting) return;
     if (!enabled() || pushTimer) return;
     const since = Date.now() - lastPushAt;
     const delay = Math.max(5000, 15000 - since);
@@ -713,6 +720,7 @@
   }
 
   async function checkRemote(fromUser) {
+    if (resetting || get(LS.reset)) return;
     if (!enabled() || applying || busy || !token()) return;
     if (!hasApp() || !App.loadingEnded) return;
     if (!fromUser) {
@@ -811,6 +819,91 @@
   }
 
   /* ======================================================================
+     Сброс питомца
+
+     «Сбросить данные питомца» в меню стирает питомца только в браузере и
+     перезагружает страницу. Сервер об этом не знал: он продолжал считать
+     старого питомца и при следующем запуске отдавал новому яйцу его
+     состояние — отсюда чужие какашки рядом со свежим яйцом, а изредка и
+     целиком старый питомец (это уже полное сохранение возвращалось назад).
+
+     Поэтому: перехватываем сам момент удаления, говорим серверу «забудь»,
+     и до тех пор, пока он не подтвердит, не берём оттуда ничего.
+     ====================================================================== */
+  let resetting = false;
+
+  function serverReset(full) {
+    resetting = true;
+    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    drop(LS.hash);
+    set(LS.reset, full ? 'full' : '1');
+    const t = token() || lastToken;
+    if (!server() || !t) return;
+    try {
+      /* keepalive: запрос должен уйти, даже если страница уже перезагружается */
+      fetch(server() + '/api/reset', {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + t },
+        body: JSON.stringify({ full: !!full })
+      }).then(r => { if (r && r.ok && !full) drop(LS.reset); }).catch(() => {});
+    } catch (e) {}
+  }
+
+  /* Игра стирает питомца через idbKeyval — на этом и ловим, не трогая App.js. */
+  function hookReset() {
+    const idb = window.idbKeyval;
+    if (!idb || idb.__tamaSyncReset) return false;
+    const wrap = (name, isReset, full) => {
+      const orig = idb[name];
+      if (typeof orig !== 'function') return;
+      idb[name] = function () {
+        try { if (isReset(arguments)) serverReset(full); } catch (e) {}
+        return orig.apply(this, arguments);
+      };
+    };
+    wrap('delMany', a => Array.isArray(a[0]) && a[0].indexOf('pet') !== -1, false);
+    wrap('del',     a => a[0] === 'pet', false);
+    wrap('clear',   () => true, true);            // «полный сброс» из меню
+    idb.__tamaSyncReset = true;
+    return true;
+  }
+
+  /* Если сброс не доехал до сервера (не было сети), доводим дело до конца
+     при следующем запуске — и только потом разрешаем обмен. */
+  async function finishPendingReset() {
+    const flag = get(LS.reset);
+    if (!flag) return false;
+    try {
+      await ensureAccount();
+      await api('/api/reset', { method: 'POST', body: JSON.stringify({ full: false }) });
+      drop(LS.reset);
+      drop(LS.hash);
+      await resubscribePush();      // после полного сброса токен новый — подписку надо перевесить
+      await pushSave(true);         // на сервере теперь лежит именно новый питомец
+      console.log('[sync] сброс питомца доведён до сервера');
+    } catch (e) {
+      console.warn('[sync] сброс до сервера пока не дошёл:', e.message);
+    }
+    return true;
+  }
+
+  /* Перевешивает уже выданную браузером подписку на текущий токен. */
+  async function resubscribePush() {
+    try {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg && await reg.pushManager.getSubscription();
+      if (!sub) return;
+      const j = sub.toJSON();
+      await api('/api/subscribe', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys, device: deviceId() })
+      });
+    } catch (e) {}
+  }
+
+  /* ======================================================================
      Запуск
      ====================================================================== */
   async function ensureAccount() {
@@ -822,6 +915,13 @@
 
   async function boot() {
     if (!enabled()) return;
+    /* Питомца только что сбросили: с сервера сейчас брать нечего и незачем —
+       там либо уже пусто, либо ещё лежит старый, которого мы стёрли. */
+    if (get(LS.reset)) {
+      window.__tamaPendingCatchUp = 0;
+      await finishPendingReset();
+      return;
+    }
     if (serverSim()) {
       try { await adoptServerState(); }
       catch (e) {
@@ -941,6 +1041,13 @@
   setInterval(() => { if (document.visibilityState === 'visible') checkRemote(); }, 25000);
   setInterval(() => pushSave(false), 60000);
 
+  /* Перехват сброса вешаем сразу и продолжаем пытаться, пока idb-keyval
+     не загрузится: меню могут открыть раньше, чем дойдут руки до boot(). */
+  (function waitIdb(tries) {
+    if (hookReset() || tries > 200) return;
+    setTimeout(() => waitIdb(tries + 1), 50);
+  })(0);
+
   setTimeout(() => { ensureSpeedSetting(); hookSave(); boot(); }, 6000);
 
   /* ======================================================================
@@ -998,7 +1105,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 6;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 8;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
