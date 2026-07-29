@@ -52,6 +52,36 @@ def pad_to_ratio(img, target):
     return canvas
 
 
+def cut_chroma(img):
+    """Убирает сплошной зелёный фон вокруг корпуса, оставляя мягкий край."""
+    a = np.asarray(img).astype(np.int16)
+    r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    green = (g > 110) & (g - r > 45) & (g - b > 45)
+    if not green.any():
+        return img, False
+
+    out = np.asarray(img).copy()
+    out[:, :, 3] = np.where(green, 0, out[:, :, 3])
+    # по краю зелень подмешивается в пиксели корпуса — гасим её,
+    # иначе вокруг остаётся ядовитая кайма
+    edge = (~green) & (g.astype(np.int32) - np.maximum(r, b) > 18)
+    mix = np.maximum(r, b).astype(np.uint8)
+    out[:, :, 1] = np.where(edge, mix, out[:, :, 1])
+    return Image.fromarray(out, 'RGBA'), True
+
+
+def trim(img):
+    """Обрезает пустые поля вокруг корпуса."""
+    alpha = np.asarray(img)[:, :, 3]
+    ys, xs = np.where(alpha > 8)
+    if not len(ys):
+        return img
+    pad = 4
+    x0 = max(0, xs.min() - pad); x1 = min(img.size[0], xs.max() + 1 + pad)
+    y0 = max(0, ys.min() - pad); y1 = min(img.size[1], ys.max() + 1 + pad)
+    return img.crop((x0, y0, x1, y1))
+
+
 def find_screen(img):
     """Ищет самое большое пятно пурпурного и возвращает его прямоугольник."""
     a = np.asarray(img.convert('RGB')).astype(np.int16)
@@ -77,7 +107,14 @@ def main():
         ar = float(sys.argv[sys.argv.index('--ar') + 1])
 
     img = Image.open(src).convert('RGBA')
-    if ar:
+
+    if '--cutout' in sys.argv:
+        img, done = cut_chroma(img)
+        if not done:
+            raise SystemExit('Зелёного фона не нашлось — корпус должен быть на сплошном #00FF00.')
+        img = trim(img)
+        print('корпус вырезан, обрезаны поля: %d×%d' % img.size)
+    elif ar:
         before = img.size
         img = pad_to_ratio(img, ar)
         if img.size != before:

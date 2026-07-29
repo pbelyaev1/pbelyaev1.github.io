@@ -38,6 +38,8 @@ const ASSETS = [
   "src/sync.js",
   "src/skin.js",
   "resources/img/skins/wood.png",
+  "resources/img/skins/shell_test.png",
+  "resources/img/skins/bg_test.jpg",
   "resources/font/PixelifySans-RU.ttf",
   // libs
   "src/libs/moment.js",

@@ -25,8 +25,8 @@ def main():
     mask = (sat < 0.13) & (val > 0.42) & (val < 0.82)
 
     # смотрим только нижнюю половину — там, где кнопки
-    mask[: int(H * 0.45), :] = False
-    mask[int(H * 0.80):, :] = False
+    mask[: int(H * 0.40), :] = False
+    mask[int(H * 0.95):, :] = False
 
     lbl = np.zeros(mask.shape, dtype=np.int32)
     blobs = []
