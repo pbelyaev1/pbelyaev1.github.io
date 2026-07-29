@@ -1654,6 +1654,10 @@
   }
 
   function inject(items) {
+    /* Защита от повторной вставки: если список уже разобран нами, второй раз
+       не трогаем — иначе при лишнем перерисовывании пункты задваиваются. */
+    if (items.some(it => typeof it.name === 'string' && it.name === 'синхронизация')) return items;
+
     const copy = items
       .filter(it => !(typeof it.name === 'string' && DROP_FROM_SETTINGS.test(it.name)))
       .map(it => {
@@ -1664,7 +1668,13 @@
       });
     let at = copy.findIndex(it => typeof it.name === 'string' && /save management|управление сохранени/i.test(it.name));
     if (at === -1) at = copy.findIndex(it => typeof it.name === 'string' && /manual save|сохранить вручную/i.test(it.name));
-    copy.splice(at === -1 ? 0 : at + 1, 0, menuItem(), soundItem(), speedItem(), modeItem());
+    const mine = [menuItem(), soundItem(), speedItem(), modeItem()];
+    /* Пункты от других наших файлов (например фотокорпус) — через общий список,
+       чтобы никто больше не перехватывал displayList и не спорил за него. */
+    for (const make of (window.TamaExtraMenu || [])) {
+      try { const it = make(); if (it) mine.push(it); } catch (e) { console.warn('[sync] пункт меню:', e); }
+    }
+    copy.splice(at === -1 ? 0 : at + 1, 0, ...mine);
     return copy;
   }
 

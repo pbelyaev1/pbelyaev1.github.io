@@ -36,6 +36,8 @@ const ASSETS = [
   "resources/data/ru.js",
   "src/i18n.js",
   "src/sync.js",
+  "src/skin.js",
+  "resources/img/skins/wood.png",
   "resources/font/PixelifySans-RU.ttf",
   // libs
   "src/libs/moment.js",
