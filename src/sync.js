@@ -77,10 +77,11 @@
   /* ======================================================================
      Что и когда понадобится питомцу
 
-     Пока игра закрыта, показатели падают в 4 раза медленнее (множитель 0.25),
-     а ночью — в 20 раз (0.05). Раньше здесь считалась скорость «как в игре»,
-     поэтому напоминания приходили сильно раньше времени. Теперь состояние
-     проигрывается вперёд шагами по минуте — ровно по правилам Pet.js.
+     Игра пересчитывает показатели ДВА раза в секунду (Pet.think: «think twice
+     a second»), и офлайн-догон делает то же самое: iterations = секунды × 2.
+     Раньше здесь считался один тик в секунду — прогноз выходил ровно вдвое
+     оптимистичнее реальности. Плюс пока игра закрыта, расход умножается на
+     0.25, а ночью на 0.05.
      ====================================================================== */
 
   const HORIZON_HOURS = 72;
@@ -187,20 +188,23 @@
     const stage = App.petDefinition.lifeStage;
     const stageMult = ({ 0: 1.65, 1: 1.46, 2: 1.3 })[stage] || 1;
 
+    const TICKS = 2;   // statsManager вызывается дважды в секунду — и в игре, и в офлайн-догоне
+
     const r = {
-      hunger:  s.hunger_depletion_rate      * stageMult * (has('lightEater') ? 0.5 : 1)   * (has('voraciousHunger') ? 1.5 : 1),
-      fun:     s.fun_depletion_rate         * stageMult * (has('chill') ? 0.5 : 1)        * (has('playBurnout') ? 1.5 : 1),
-      sleep:   s.sleep_depletion_rate       * stageMult * (has('deepSleeper') ? 0.5 : 1)  * (has('restless') ? 1.5 : 1),
-      bladder: s.bladder_depletion_rate     * stageMult * (has('ironBladder') ? 0.5 : 1)  * (has('tinyTank') ? 1.5 : 1),
-      clean:   s.cleanliness_depletion_rate * stageMult * (has('selfCleaning') ? 0.5 : 1) * (has('dustMagnet') ? 1.5 : 1),
-      health:  s.health_depletion_rate      * stageMult * (has('germGuardian') ? 0.5 : 1),
+      hunger:  s.hunger_depletion_rate      * TICKS * stageMult * (has('lightEater') ? 0.5 : 1)   * (has('voraciousHunger') ? 1.5 : 1),
+      fun:     s.fun_depletion_rate * TICKS         * stageMult * (has('chill') ? 0.5 : 1)        * (has('playBurnout') ? 1.5 : 1),
+      sleep:   s.sleep_depletion_rate * TICKS       * stageMult * (has('deepSleeper') ? 0.5 : 1)  * (has('restless') ? 1.5 : 1),
+      bladder: s.bladder_depletion_rate * TICKS     * stageMult * (has('ironBladder') ? 0.5 : 1)  * (has('tinyTank') ? 1.5 : 1),
+      clean:   s.cleanliness_depletion_rate * TICKS * stageMult * (has('selfCleaning') ? 0.5 : 1) * (has('dustMagnet') ? 1.5 : 1),
+      health:  s.health_depletion_rate * TICKS      * stageMult * (has('germGuardian') ? 0.5 : 1),
     };
 
     // пороги берём те же, по которым сама игра понимает, что питомец чего-то хочет
+    const grumpy = has('grumpy');   // ворчуну всего надо раньше остальных
     const T = {
-      hunger: s.hunger_min_desire != null ? s.hunger_min_desire : 40,
-      fun:    s.fun_min_desire    != null ? s.fun_min_desire    : 35,
-      sleep:  s.sleep_min_desire  != null ? s.sleep_min_desire  : 20,
+      hunger: (s.hunger_min_desire != null ? s.hunger_min_desire : 40) * (grumpy ? 1.5 : 1),
+      fun:    (s.fun_min_desire    != null ? s.fun_min_desire    : 35) * (grumpy ? 1.8 : 1),
+      sleep:  (s.sleep_min_desire  != null ? s.sleep_min_desire  : 20) * (grumpy ? 2 : 1),
       toilet: (s.max_bladder || 100) / 4,
       clean:  25,
       sick:   (s.max_health || 100) * 0.25,
