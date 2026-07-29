@@ -81,7 +81,8 @@
      a second»), и офлайн-догон делает то же самое: iterations = секунды × 2.
      Раньше здесь считался один тик в секунду — прогноз выходил ровно вдвое
      оптимистичнее реальности. Плюс пока игра закрыта, расход умножается на
-     0.25, а ночью на 0.05.
+     0.25, а ночью на 0.05. Теперь это настройка settings.offlineSpeed:
+     по умолчанию 1 — жизнь в закрытой игре идёт ровно как в открытой.
      ====================================================================== */
 
   const HORIZON_HOURS = 72;
@@ -169,6 +170,15 @@
     } catch (e) {}
   }
 
+  /* Та же величина, что читает Pet.js. По умолчанию 1 — без замедления. */
+  function offlineSpeed() {
+    try {
+      const v = App.settings.offlineSpeed;
+      if (typeof v === 'number' && v >= 0) return v;
+    } catch (e) {}
+    return 1;
+  }
+
   function collectNeeds() {
     if (!hasApp() || !App.pet || !App.pet.stats || !App.petDefinition) return [];
     const s = App.pet.stats;
@@ -227,7 +237,7 @@
     for (let i = 0; i <= steps; i++) {
       const at = now + i * STEP_SEC * 1000;
       const night = isSleepHourAt(new Date(at));
-      const mult = night ? 0.05 : 0.25;          // игра закрыта
+      const mult = offlineSpeed();               // скорость жизни в закрытой игре
       const dt = STEP_SEC;
 
       if (!sleeping) {
@@ -779,6 +789,13 @@
   }
 
   /* ---------- когда отправлять и когда проверять ---------- */
+  /* Ставим значение по умолчанию, если его ещё нет: оно должно попасть
+     в сохранение, иначе на другом устройстве окажется другая скорость. */
+  function ensureSpeedSetting() {
+    if (!hasApp() || !App.settings) return;
+    if (typeof App.settings.offlineSpeed !== 'number') App.settings.offlineSpeed = 1;
+  }
+
   function hookSave() {
     if (!hasApp() || typeof App.save !== 'function' || App.save.__tamaSync) return false;
     const orig = App.save;
@@ -815,7 +832,7 @@
   setInterval(() => { if (document.visibilityState === 'visible') checkRemote(); }, 25000);
   setInterval(() => pushSave(false), 60000);
 
-  setTimeout(() => { hookSave(); boot(); }, 6000);
+  setTimeout(() => { ensureSpeedSetting(); hookSave(); boot(); }, 6000);
 
   /* ======================================================================
      Экран в настройках игры
@@ -1140,11 +1157,36 @@
     };
   }
 
+  const SPEEDS = [
+    { v: 1,    label: '100%', note: 'Жизнь в закрытой игре идёт ровно так же, как в открытой' },
+    { v: 0.5,  label: '50%',  note: 'В закрытой игре вдвое спокойнее' },
+    { v: 0.25, label: '25%',  note: 'Как было в оригинале Tamaweb' },
+    { v: 0.1,  label: '10%',  note: 'Питомец почти не меняется, пока игра закрыта' },
+  ];
+
+  function speedItem() {
+    const cur = offlineSpeed();
+    const idx = Math.max(0, SPEEDS.findIndex(s => s.v === cur));
+    return {
+      icon: 'gauge-high',
+      name: 'закрыто: ' + (SPEEDS[idx] ? SPEEDS[idx].label : Math.round(cur * 100) + '%'),
+      onclick: (btn) => {
+        const next = SPEEDS[(idx + 1) % SPEEDS.length];
+        App.settings.offlineSpeed = next.v;
+        App.save();
+        pushSave(true);
+        btn.innerHTML = (App.getIcon ? App.getIcon('gauge-high', true) : '') + ' закрыто: ' + next.label;
+        popup(next.note, 4000);
+        return true;
+      }
+    };
+  }
+
   function inject(items) {
     const copy = items.filter(it => !(typeof it.name === 'string' && DROP_FROM_SETTINGS.test(it.name)));
     let at = copy.findIndex(it => typeof it.name === 'string' && /save management|управление сохранени/i.test(it.name));
     if (at === -1) at = copy.findIndex(it => typeof it.name === 'string' && /manual save|сохранить вручную/i.test(it.name));
-    copy.splice(at === -1 ? 0 : at + 1, 0, menuItem(), soundItem());
+    copy.splice(at === -1 ? 0 : at + 1, 0, menuItem(), soundItem(), speedItem());
     return copy;
   }
 

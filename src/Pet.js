@@ -893,11 +893,16 @@ class Pet extends Object2d {
 
         let depletion_mult = 1, offlineAndIsNight = false;
         if(isOfflineProgression){
-            depletion_mult = 0.25;
+            /* НАША ПРАВКА: скорость жизни в закрытой игре стала настройкой.
+               1 — всё идёт ровно так же, как при открытом приложении (по умолчанию).
+               0.25 и 0.05 ночью — как было в оригинале Tamaweb.
+               Ночью питомец всё равно спит: offlineAndIsNight включает
+               восстановление сна, а расход считается по той же скорости. */
+            const offlineSpeed = App.settings?.offlineSpeed;
+            depletion_mult = (typeof offlineSpeed === 'number' && offlineSpeed >= 0) ? offlineSpeed : 1;
 
             if(App.isSleepHour(hour)){
                 offlineAndIsNight = true;
-                depletion_mult = 0.05;
             }
         } else {
             this.attemptMisbehave();
