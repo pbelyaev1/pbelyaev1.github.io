@@ -1164,18 +1164,24 @@
     { v: 0.1,  label: '10%',  note: 'Питомец почти не меняется, пока игра закрыта' },
   ];
 
+  const speedLabel = v => {
+    const found = SPEEDS.find(s => s.v === v);
+    return found ? found.label : Math.round(v * 100) + '%';
+  };
+
   function speedItem() {
-    const cur = offlineSpeed();
-    const idx = Math.max(0, SPEEDS.findIndex(s => s.v === cur));
     return {
       icon: 'gauge-high',
-      name: 'закрыто: ' + (SPEEDS[idx] ? SPEEDS[idx].label : Math.round(cur * 100) + '%'),
+      name: 'закрыто: ' + speedLabel(offlineSpeed()),
       onclick: (btn) => {
-        const next = SPEEDS[(idx + 1) % SPEEDS.length];
+        /* Текущее значение читаем прямо сейчас, а не при отрисовке меню:
+           иначе каждое нажатие переключало бы на одно и то же. */
+        const idx = SPEEDS.findIndex(s => s.v === offlineSpeed());
+        const next = SPEEDS[((idx < 0 ? 0 : idx) + 1) % SPEEDS.length];
         App.settings.offlineSpeed = next.v;
         App.save();
         pushSave(true);
-        btn.innerHTML = (App.getIcon ? App.getIcon('gauge-high', true) : '') + ' закрыто: ' + next.label;
+        btn.innerHTML = (App.getIcon ? App.getIcon('gauge-high', true) : '') + ' закрыто: ' + speedLabel(next.v);
         popup(next.note, 4000);
         return true;
       }
