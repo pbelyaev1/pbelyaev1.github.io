@@ -240,7 +240,6 @@
     if (s.is_dead) { mark('dead', now); return finish(found, name, now); }
     if (s.is_egg) { mark('egg', now); return finish(found, name, now); }
 
-    const has = n => { try { return !!App.petDefinition.hasTrait(n); } catch (e) { return false; } };
     /* Стадии в игре пронумерованы 0 / 0.5 / 1 / 2 / 3, а не подряд —
        раньше здесь взрослому доставался множитель подростка. */
     const stage = App.petDefinition.lifeStage;
@@ -248,21 +247,25 @@
 
     const TICKS = 2;   // statsManager вызывается дважды в секунду — и в игре, и в офлайн-догоне
 
+    /* Черты характера («мало ест», «крепкий сон», «ворчун» и прочие) на скорость
+       расхода и на пороги желаний НЕ влияют — не потому, что мы так решили, а
+       потому что так работает сама игра: в Pet.statsManager функция hasTrait
+       берётся через разбор объекта и всегда возвращает undefined. Прогноз
+       обязан повторять игру, иначе время уведомлений разъедется. */
     const r = {
-      hunger:  s.hunger_depletion_rate      * TICKS * stageMult * (has('lightEater') ? 0.5 : 1)   * (has('voraciousHunger') ? 1.5 : 1),
-      fun:     s.fun_depletion_rate * TICKS         * stageMult * (has('chill') ? 0.5 : 1)        * (has('playBurnout') ? 1.5 : 1),
-      sleep:   s.sleep_depletion_rate * TICKS       * stageMult * (has('deepSleeper') ? 0.5 : 1)  * (has('restless') ? 1.5 : 1),
-      bladder: s.bladder_depletion_rate * TICKS     * stageMult * (has('ironBladder') ? 0.5 : 1)  * (has('tinyTank') ? 1.5 : 1),
-      clean:   s.cleanliness_depletion_rate * TICKS * stageMult * (has('selfCleaning') ? 0.5 : 1) * (has('dustMagnet') ? 1.5 : 1),
-      health:  s.health_depletion_rate * TICKS      * stageMult * (has('germGuardian') ? 0.5 : 1),
+      hunger:  s.hunger_depletion_rate      * TICKS * stageMult,
+      fun:     s.fun_depletion_rate         * TICKS * stageMult,
+      sleep:   s.sleep_depletion_rate       * TICKS * stageMult,
+      bladder: s.bladder_depletion_rate     * TICKS * stageMult,
+      clean:   s.cleanliness_depletion_rate * TICKS * stageMult,
+      health:  s.health_depletion_rate      * TICKS * stageMult,
     };
 
     // пороги берём те же, по которым сама игра понимает, что питомец чего-то хочет
-    const grumpy = has('grumpy');   // ворчуну всего надо раньше остальных
     const T = {
-      hunger: (s.hunger_min_desire != null ? s.hunger_min_desire : 40) * (grumpy ? 1.5 : 1),
-      fun:    (s.fun_min_desire    != null ? s.fun_min_desire    : 35) * (grumpy ? 1.8 : 1),
-      sleep:  (s.sleep_min_desire  != null ? s.sleep_min_desire  : 20) * (grumpy ? 2 : 1),
+      hunger: (s.hunger_min_desire != null ? s.hunger_min_desire : 40),
+      fun:    (s.fun_min_desire    != null ? s.fun_min_desire    : 35),
+      sleep:  (s.sleep_min_desire  != null ? s.sleep_min_desire  : 20),
       toilet: (s.max_bladder || 100) / 4,
       clean:  25,
       sick:   (s.max_health || 100) * 0.25,
@@ -272,33 +275,53 @@
     let hunger = s.current_hunger, fun = s.current_fun, sleep = s.current_sleep,
         bladder = s.current_bladder, clean = s.current_cleanliness, health = s.current_health,
         poop = s.has_poop_out || 0;
-    /* Спящего питомца нельзя ни покормить, ни поиграть с ним: игра на это время
-       отключает управление. Пока он спит — молчим, иначе получается «проголодался»
-       про питомца, которого сам же уложил. */
     let sleeping = !!s.is_sleeping;
     const sleepMax = s.max_sleep || 100;
     const replenish = s.sleep_replenish_rate || 0.1;
 
     if (s.is_misbehaving) mark('misbehave', now);
 
+    /* Прогноз обязан описывать тот порядок, по которому уведомления реально
+       приходят, — а он зависит от режима счёта:
+
+       • «на сервере» (по умолчанию) — питомец живёт так, будто игра открыта:
+         ночью сам не засыпает, а сервер сообщает о СОБЫТИИ, то есть о самом
+         переходе через порог. Если показатель уже ниже порога, когда игру
+         закрыли, повторно об этом не напоминают: игрок это только что видел.
+
+       • «в игре» — браузер досчитывает пропущенное офлайн-догоном, где ночью
+         питомец укладывается сам и восстанавливает сон вдвое быстрее. */
+    const srv = serverSim();
+    const startPoop = poop;
+    const wasBelow = {
+      hunger: hunger <= T.hunger, fun: fun <= T.fun, sleep: sleep <= T.sleep,
+      toilet: bladder <= T.toilet, clean: clean <= T.clean,
+      sick: health <= T.sick, danger: health <= T.danger,
+    };
+    /* в серверном режиме отмечаем только переходы, а не «уже давно так» */
+    const cross = (key, cond, at) => { if (cond && !(srv && wasBelow[key])) mark(key, at); };
+
     const steps = Math.round(HORIZON_HOURS * 3600 / STEP_SEC);
     for (let i = 0; i <= steps; i++) {
       const at = now + i * STEP_SEC * 1000;
-      const night = isSleepHourAt(new Date(at));
-      const mult = offlineSpeed();               // скорость жизни в закрытой игре
+      const night = srv ? false : isSleepHourAt(new Date(at));
+      const mult = offlineSpeed();               // скорость жизни, пока игра закрыта
       const dt = STEP_SEC;
 
-      if (!sleeping) {
-        if (hunger <= T.hunger) mark('hunger', at);
-        if (fun <= T.fun) mark('fun', at);
-        if (!night && sleep <= T.sleep) mark('sleep', at);
-        if (bladder <= T.toilet) mark('toilet', at);
+      /* Спящего питомца нельзя ни покормить, ни поиграть с ним — в режиме
+         «в игре» пока он спит, молчим. Сервер же сообщает и про спящего:
+         он о состоянии питомца, а не о том, что игрок может сделать сейчас. */
+      if (srv || !sleeping) {
+        cross('hunger', hunger <= T.hunger, at);
+        cross('fun', fun <= T.fun, at);
+        cross('sleep', !night && sleep <= T.sleep, at);
+        cross('toilet', bladder <= T.toilet, at);
       }
-      if (poop > 0) mark('poop', at);
-      if (clean <= T.clean) mark('clean', at);
-      if (health <= T.sick) mark('sick', at);
+      if (poop > (srv ? startPoop : 0)) mark('poop', at);
+      cross('clean', clean <= T.clean, at);
+      cross('sick', health <= T.sick, at);
       // отсчёт до смерти в игре запускается, когда всё это разом на нуле
-      if (health <= T.danger || (health <= 0 && clean <= 0 && fun <= 0 && hunger <= 0)) mark('danger', at);
+      cross('danger', health <= T.danger || (health <= 0 && clean <= 0 && fun <= 0 && hunger <= 0), at);
 
       // шаг вперёд
       hunger = Math.max(0, hunger - r.hunger * mult * dt);
@@ -307,7 +330,9 @@
 
       if (sleeping) {
         sleep = Math.min(sleepMax, sleep + replenish * (night ? 2 : 1) * dt);
-        if (sleep >= sleepMax && !night) sleeping = false;      // выспался и проснулся
+        // сам просыпается только в режиме «в игре»: сервер спящего не будит,
+        // питомец проснётся, когда игрок откроет приложение
+        if (!srv && sleep >= sleepMax && !night) sleeping = false;
       } else if (night) {
         sleeping = true;                                        // ночью укладывается сам
       } else {
@@ -1105,7 +1130,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 8;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 9;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
