@@ -22,6 +22,7 @@
   const hasApp = () => typeof App !== 'undefined' && !!App;
   const LS_ON = 'tama_skin_on';
   const LS_ID = 'tama_skin_id';
+  const LS_ZOOM = 'tama_skin_zoom';
 
   /* ---------------------------------------------------------------------- */
   /* Описание скинов. Доли считаются от размера картинки, поэтому геометрия
@@ -31,16 +32,14 @@
     wood: {
       name: 'деревянный стол',
       image: 'resources/img/skins/wood.png',
-      w: 1206, h: 2622,
-      screen:  { x: 0.30348, y: 0.38596, w: 0.39386, h: 0.18459 },
-      radius:  0.035,          // скругление углов экрана, доля от ширины экрана
+      w: 851, h: 1847,
+      screen:  { x: 0.35958, y: 0.42122, w: 0.28202, h: 0.12777 },
+      radius:  0.02,           // скругление углов экрана, доля от ширины экрана
       buttons: [
-        { x: 0.29436, y: 0.58734, w: 0.10282, h: 0.04729 },   // левая
-        { x: 0.44859, y: 0.60031, w: 0.10282, h: 0.04729 },   // средняя
-        { x: 0.60282, y: 0.58734, w: 0.10282, h: 0.04729 },   // правая
+        { x: 0.36947, y: 0.57990, w: 0.06599, h: 0.02807 },   // левая
+        { x: 0.46700, y: 0.59007, w: 0.06599, h: 0.02885 },   // средняя
+        { x: 0.56454, y: 0.57990, w: 0.06599, h: 0.02807 },   // правая
       ],
-      /* Свет на фотографии идёт слева сверху — блик на стекле кладём так же,
-         иначе стекло «спорит» со сценой и всё разваливается. */
       glare: 'left-top',
     },
   };
@@ -51,6 +50,12 @@
   };
   const skin = () => SKINS[skinId()];
   const isOn = () => localStorage.getItem(LS_ON) === '1';
+  /* Насколько приближена сцена. Единица — вся фотография целиком; больше —
+     устройство крупнее, но края стола уходят за границы экрана. */
+  const zoom = () => {
+    const v = parseFloat(localStorage.getItem(LS_ZOOM));
+    return v >= 1 && v <= 2 ? v : (skin().zoom || 1);
+  };
 
   /* ---------------------------------------------------------------------- */
   /* Стили держим здесь же, чтобы не лезть в styles.css игры.                */
@@ -59,8 +64,8 @@
 .skin-layer{position:fixed;inset:0;overflow:hidden;z-index:2;pointer-events:none;
   background:#0b0b0d;}
 .skin-stage{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
-  width:max(100vw, calc(100vh * var(--skin-ar)));
-  height:max(100vh, calc(100vw / var(--skin-ar)));}
+  width:calc(max(100vw, 100vh * var(--skin-ar)) * var(--skin-zoom, 1));
+  height:calc(max(100vh, 100vw / var(--skin-ar)) * var(--skin-zoom, 1));}
 .skin-photo{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;
   display:block;user-select:none;-webkit-user-drag:none;}
 
@@ -132,6 +137,7 @@
     layer = document.createElement('div');
     layer.className = 'skin-layer';
     layer.style.setProperty('--skin-ar', (s.w / s.h).toFixed(5));
+    layer.style.setProperty('--skin-zoom', String(zoom()));
 
     const stage = document.createElement('div');
     stage.className = 'skin-stage';
@@ -231,21 +237,31 @@
   /* ---------------------------------------------------------------------- */
   /* Пункт в настройках                                                      */
   /* ---------------------------------------------------------------------- */
+  /* Пункт переключается по кругу: выключено → вся сцена → крупно → выключено.
+     Так не нужен ни второй пункт, ни консоль. */
+  const STATES = [
+    { on: false, zoom: 1,    label: 'выкл',        note: 'Вернули обычный корпус.' },
+    { on: true,  zoom: 1,    label: 'вся сцена',   note: 'Стол виден целиком.' },
+    { on: true,  zoom: 1.35, label: 'крупно',      note: 'Корпус ближе, края стола уходят за экран.' },
+  ];
+  const stateIndex = () => {
+    if (!isOn()) return 0;
+    return Math.abs(zoom() - 1) < 0.01 ? 1 : 2;
+  };
+  const label = () => 'фотокорпус: ' + STATES[stateIndex()].label;
+
   function menuItem() {
     return {
       icon: 'image',
-      name: 'фотокорпус: ' + (isOn() ? 'вкл' : 'выкл'),
+      name: label(),
       onclick: (btn) => {
-        const now = !isOn();
-        localStorage.setItem(LS_ON, now ? '1' : '0');
+        const next = STATES[(stateIndex() + 1) % STATES.length];
+        localStorage.setItem(LS_ON, next.on ? '1' : '0');
+        localStorage.setItem(LS_ZOOM, String(next.zoom));
+        if (layer) destroy();
         apply();
-        btn.innerHTML = (App.getIcon ? App.getIcon('image', true) : '') +
-                        ' фотокорпус: ' + (now ? 'вкл' : 'выкл');
-        try {
-          App.displayPopup(now
-            ? 'Корпус и стол теперь настоящая фотография. Выключить можно здесь же.'
-            : 'Вернули обычный корпус.', 3500);
-        } catch (e) {}
+        btn.innerHTML = (App.getIcon ? App.getIcon('image', true) : '') + ' ' + label();
+        try { App.displayPopup(next.note, 3000); } catch (e) {}
         return true;
       }
     };
@@ -275,6 +291,11 @@
     off: () => { localStorage.setItem(LS_ON, '0'); apply(); },
     list: () => Object.keys(SKINS),
     use: id => { if (SKINS[id]) { localStorage.setItem(LS_ID, id); if (layer) { destroy(); build(); } } },
+    zoom: n => {
+      if (n) localStorage.setItem(LS_ZOOM, String(n)); else localStorage.removeItem(LS_ZOOM);
+      if (layer) { destroy(); build(); }
+      return zoom();
+    },
     rect: () => {
       const el = layer && layer.querySelector('.skin-screen');
       return el ? el.getBoundingClientRect() : null;
