@@ -170,6 +170,9 @@
     } catch (e) {}
   }
 
+  /* Кто считает жизнь питомца, пока игра закрыта: браузер (прогноз) или сервер. */
+  const serverSim = () => { try { return App.settings.simOnServer === true; } catch (e) { return false; } };
+
   /* Та же величина, что читает Pet.js. По умолчанию 1 — без замедления. */
   function offlineSpeed() {
     try {
@@ -177,6 +180,20 @@
       if (typeof v === 'number' && v >= 0) return v;
     } catch (e) {}
     return 1;
+  }
+
+  /* Всё, что нужно серверу, чтобы продолжить жизнь питомца с этой точки. */
+  function simSnapshot() {
+    try {
+      return {
+        stats: JSON.parse(JSON.stringify(App.pet.stats)),
+        traits: (App.petDefinition.traits || []).slice(),
+        stage: App.petDefinition.lifeStage,
+        speed: offlineSpeed(),
+        sleepStart: App.constants.SLEEP_START + (App.settings.sleepingHoursOffset || 0),
+        sleepEnd: App.constants.SLEEP_END + (App.settings.sleepingHoursOffset || 0),
+      };
+    } catch (e) { return null; }
   }
 
   function collectNeeds() {
@@ -195,8 +212,10 @@
     if (s.is_egg) { mark('egg', now); return finish(found, name, now); }
 
     const has = n => { try { return !!App.petDefinition.hasTrait(n); } catch (e) { return false; } };
+    /* Стадии в игре пронумерованы 0 / 0.5 / 1 / 2 / 3, а не подряд —
+       раньше здесь взрослому доставался множитель подростка. */
     const stage = App.petDefinition.lifeStage;
-    const stageMult = ({ 0: 1.65, 1: 1.46, 2: 1.3 })[stage] || 1;
+    const stageMult = stage === 0 ? 1.65 : stage === 0.5 ? 1.46 : stage === 1 ? 1.3 : 1;
 
     const TICKS = 2;   // statsManager вызывается дважды в секунду — и в игре, и в офлайн-догоне
 
@@ -485,6 +504,8 @@
           active: lastInteraction,
           seen: document.visibilityState === 'visible' ? Date.now() : 0,
           needs: collectNeeds(),
+          mode: serverSim() ? 'server' : 'client',
+          sim: simSnapshot(),
           pet_name: (App.petDefinition && App.petDefinition.name) || null
         })
       });
@@ -775,6 +796,18 @@
 
   async function boot() {
     if (!enabled()) return;
+    if (serverSim()) {
+      try { await adoptServerState(); }
+      catch (e) {
+        // сервер не ответил — досчитываем сами, как в обычном режиме
+        const pending = window.__tamaPendingCatchUp;
+        if (pending && originalCatchUp) {
+          console.warn('[sync] сервер не отдал состояние, считаем сами:', e.message);
+          originalCatchUp.call(App.pet, pending);
+          window.__tamaPendingCatchUp = 0;
+        }
+      }
+    }
     try {
       await ensureAccount();
       const { data } = await api('/api/meta');
@@ -794,6 +827,33 @@
   function ensureSpeedSetting() {
     if (!hasApp() || !App.settings) return;
     if (typeof App.settings.offlineSpeed !== 'number') App.settings.offlineSpeed = 1;
+  }
+
+  /* В серверном режиме офлайн-догон в браузере отключается: состояние
+     приходит с сервера. Если сервер недоступен — возвращаем всё как было,
+     чтобы питомец не завис во времени. */
+  let originalCatchUp = null;
+  function hookOfflineCatchUp() {
+    if (typeof Pet === 'undefined' || !Pet.prototype) return;
+    if (Pet.prototype.simulateOfflineProgression.__tamaSync) return;
+    originalCatchUp = Pet.prototype.simulateOfflineProgression;
+    const patched = function (elapsed) {
+      if (serverSim()) { window.__tamaPendingCatchUp = elapsed; return; }
+      return originalCatchUp.apply(this, arguments);
+    };
+    patched.__tamaSync = true;
+    Pet.prototype.simulateOfflineProgression = patched;
+  }
+
+  async function adoptServerState() {
+    const { data } = await api('/api/state');
+    if (!data || !data.has_state || !data.stats) throw new Error('сервер ещё не считал');
+    const s = App.pet.stats;
+    Object.keys(data.stats).forEach(k => { s[k] = data.stats[k]; });
+    await window.idbKeyval.set('last_time', data.at || Date.now());
+    window.__tamaPendingCatchUp = 0;
+    console.log('[sync] состояние взято с сервера');
+    return true;
   }
 
   function hookSave() {
@@ -889,7 +949,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 5;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 6;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -935,6 +995,8 @@
         : '<b>расписание ни разу не запускалось</b> — проверь Cron Trigger');
       rows.push('последнее уведомление: <b>' + ago(st.last_notify) + '</b>');
       rows.push('уведомлений за сегодня: ' + (st.notify_today || 0));
+      rows.push('счёт: <b>' + (st.mode === 'server' ? 'на сервере' : 'в игре') + '</b>');
+      if (st.mode === 'server') rows.push('питомец досчитан: ' + ago(st.sim_at));
       if (st.next_call_at) rows.push('следующая проверка: ' + when(st.next_call_at));
       items.push({ type: 'info', icon: 'server', name: rows.join('<br>') });
     }
@@ -1188,11 +1250,30 @@
     };
   }
 
+  function modeItem() {
+    return {
+      icon: 'calculator',
+      name: 'счёт: ' + (serverSim() ? 'на сервере' : 'в игре'),
+      onclick: (btn) => {
+        const now = !serverSim();
+        App.settings.simOnServer = now;
+        App.save();
+        pushSave(true);
+        btn.innerHTML = (App.getIcon ? App.getIcon('calculator', true) : '') +
+                        ' счёт: ' + (now ? 'на сервере' : 'в игре');
+        popup(now
+          ? 'Питомец теперь живёт на сервере круглосуточно. Уведомления приходят в момент события.'
+          : 'Питомец снова живёт в браузере, а сервер только предсказывает события.', 5000);
+        return true;
+      }
+    };
+  }
+
   function inject(items) {
     const copy = items.filter(it => !(typeof it.name === 'string' && DROP_FROM_SETTINGS.test(it.name)));
     let at = copy.findIndex(it => typeof it.name === 'string' && /save management|управление сохранени/i.test(it.name));
     if (at === -1) at = copy.findIndex(it => typeof it.name === 'string' && /manual save|сохранить вручную/i.test(it.name));
-    copy.splice(at === -1 ? 0 : at + 1, 0, menuItem(), soundItem(), speedItem());
+    copy.splice(at === -1 ? 0 : at + 1, 0, menuItem(), soundItem(), speedItem(), modeItem());
     return copy;
   }
 
@@ -1224,9 +1305,11 @@
   const hookTimer = setInterval(() => {
     installMenuHook();
     hookSave();
+    hookOfflineCatchUp();
     if (++tries > 120) clearInterval(hookTimer);
   }, 500);
   installMenuHook();
+  hookOfflineCatchUp();
 
   /* ---------- на случай отладки из консоли ---------- */
   window.TamaSync = {
@@ -1245,6 +1328,7 @@
     push: () => pushSave(true),
     pull: () => pullAndApply(false),
     check: checkRemote,
+    adopt: adoptServerState,
     needs: collectNeeds,
     diag: openDiagnostics,
     why: liveBlocker,
