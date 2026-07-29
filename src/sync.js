@@ -89,16 +89,23 @@
   /* short — для случая, когда назрело несколько дел сразу: тогда сервер
      соберёт из них одно уведомление, а не пришлёт четыре подряд. */
   const NEED_TEXT = {
-    hunger:     { title: '{name} проголодался',      body: 'Пора покормить',        short: 'голоден' },
-    fun:        { title: '{name} скучает',           body: 'Хочет поиграть',        short: 'скучает' },
-    sleep:      { title: '{name} хочет спать',       body: 'Пора выключить свет',   short: 'хочет спать' },
-    toilet:     { title: '{name} просится в туалет', body: 'Отведи его',            short: 'просится в туалет' },
-    poop:       { title: 'У {name} грязно',          body: 'Надо убрать',           short: 'надо убрать' },
-    clean:      { title: '{name} испачкался',        body: 'Пора помыть',           short: 'надо помыть' },
-    sick:       { title: '{name} заболел',           body: 'Нужно лекарство',       short: 'заболел' },
-    danger:     { title: '{name} совсем плохо!',     body: 'Срочно зайди в игру',   short: 'совсем плохо' },
-    misbehave:  { title: '{name} балуется',          body: 'Стоит поругать',        short: 'балуется' },
-    egg:        { title: 'Яйцо шевелится',           body: 'Кажется, скоро вылупится', short: 'яйцо шевелится' },
+    dead:        { title: '{name} умер',              body: 'Можно воскресить',        short: 'умер' },
+    danger:      { title: '{name} совсем плохо!',     body: 'Срочно зайди в игру',     short: 'совсем плохо' },
+    sick:        { title: '{name} заболел',           body: 'Нужно лекарство',         short: 'заболел' },
+    hunger:      { title: '{name} проголодался',      body: 'Пора покормить',          short: 'голоден' },
+    toilet:      { title: '{name} просится в туалет', body: 'Отведи его',              short: 'просится в туалет' },
+    poop:        { title: 'У {name} грязно',          body: 'Надо убрать',             short: 'надо убрать' },
+    fun:         { title: '{name} скучает',           body: 'Хочет поиграть',          short: 'скучает' },
+    sleep:       { title: '{name} хочет спать',       body: 'Пора выключить свет',     short: 'хочет спать' },
+    clean:       { title: '{name} испачкался',        body: 'Пора помыть',             short: 'надо помыть' },
+    misbehave:   { title: '{name} балуется',          body: 'Стоит поругать',          short: 'балуется' },
+    home:        { title: '{name} вернулся домой',    body: 'Занятие закончилось',     short: 'вернулся домой' },
+    ageup:       { title: '{name} готов повзрослеть', body: 'Загляни — он изменится',  short: 'готов повзрослеть' },
+    egg:         { title: 'Яйцо ждёт',                body: 'Оно вылупится, когда откроешь игру', short: 'яйцо ждёт' },
+    plant_ready: { title: 'Урожай готов',             body: 'Пора собирать',           short: 'урожай готов' },
+    plant_water: { title: 'Растения хотят пить',      body: 'Пора полить',             short: 'полить растения' },
+    plant_dying: { title: 'Растение погибает',        body: 'Полей, пока не поздно',   short: 'растение погибает' },
+    animal:      { title: 'Животное заскучало',       body: 'Покорми и поиграй',       short: 'животное скучает' },
   };
 
   function isSleepHourAt(date) {
@@ -108,25 +115,57 @@
 
   /* Что важнее чего. Заодно решает ничьи: если два дела назрели к одному
      времени, первым показываем и отправляем то, что серьёзнее. */
-  const PRIORITY = ['danger', 'sick', 'hunger', 'toilet', 'poop', 'fun', 'sleep', 'clean', 'misbehave', 'egg'];
+  const PRIORITY = Object.keys(NEED_TEXT);
   const rank = k => { const i = PRIORITY.indexOf(k); return i < 0 ? 99 : i; };
 
-  /* Про болезнь и угрозу жизни будим в любое время суток: питомец может не
-     дожить до утра. Остальное ночью не срочно. */
-  const CRITICAL = ['danger', 'sick'];
-  const isCritical = k => CRITICAL.indexOf(k) !== -1;
 
-  /* ночью не будим: переносим на 9:30 утра */
-  function shiftFromNight(ms, key) {
-    if (isCritical(key)) return ms;
-    const d = new Date(ms), h = d.getHours();
-    if (h >= 22 || h < 9) {
-      const m = new Date(ms);
-      if (h >= 22) m.setDate(m.getDate() + 1);
-      m.setHours(9, 30, 0, 0);
-      return m.getTime();
-    }
-    return ms;
+
+  /* События, которые не выводятся из показателей питомца: возвращение
+     с занятия, взросление, огород, животные. У всех есть точное время. */
+  function collectWorldEvents(mark, now) {
+    const s = App.pet.stats;
+
+    // питомец ушёл на занятие — известно, когда вернётся
+    try {
+      const hole = s.current_rabbit_hole;
+      if (hole && hole.name && hole.endTime) mark('home', hole.endTime);
+    } catch (e) {}
+
+    // автоматическое взросление
+    try {
+      if (App.settings.automaticAging) {
+        const next = App.petDefinition.getNextAutomaticBirthdayDate();
+        if (next) {
+          const at = next.valueOf ? next.valueOf() : +next;
+          if (at) mark('ageup', at);
+        }
+      }
+    } catch (e) {}
+
+    // огород
+    try {
+      const GROWN = (typeof Plant !== 'undefined' && Plant.AGE) ? Plant.AGE.grown : 2;
+      const DEAD = (typeof Plant !== 'undefined' && Plant.AGE) ? Plant.AGE.dead : 3;
+      for (const p of App.plants || []) {
+        if (p.age === DEAD) continue;
+        const d = p.getStatDurations ? p.getStatDurations() : null;
+        if (!d) continue;
+        if (p.age >= GROWN) mark('plant_ready', now);
+        else mark('plant_ready', p.lastGrowthTime + d.growthDelay * (GROWN - p.age));
+        mark('plant_water', p.lastWatered + d.wateredDuration);
+        mark('plant_dying', p.lastWatered + d.wateredDuration + d.deathDuration);
+      }
+    } catch (e) {}
+
+    // животные: счастье падает со 100 до нуля за 48 часов, дальше зверь уходит
+    try {
+      const perSec = 100 / (48 * 3600);
+      for (const a of (App.animals && App.animals.list) || []) {
+        const h = a.stats && a.stats.current_happiness;
+        if (typeof h !== 'number') continue;
+        mark('animal', now + Math.max(0, (h - 20)) / perSec * 1000);
+      }
+    } catch (e) {}
   }
 
   function collectNeeds() {
@@ -136,9 +175,12 @@
     const found = {};
     const now = Date.now();
 
-    const mark = (key, at) => { if (found[key] == null) found[key] = at; };
+    // из нескольких источников одного события берём самое раннее время
+    const mark = (key, at) => { if (found[key] == null || at < found[key]) found[key] = at; };
 
-    if (s.is_dead) return [];
+    collectWorldEvents(mark, now);
+
+    if (s.is_dead) { mark('dead', now); return finish(found, name, now); }
     if (s.is_egg) { mark('egg', now); return finish(found, name, now); }
 
     const has = n => { try { return !!App.petDefinition.hasTrait(n); } catch (e) { return false; } };
@@ -221,25 +263,19 @@
         health = Math.max(0, health - r.health * (s.health_depletion_mult || 0.5) * mult * dt);
       }
 
-      if (Object.keys(found).length >= 8) break;
+      if (Object.keys(found).length >= 14) break;
     }
 
     return finish(found, name, now);
   }
 
-  /* Если потребность уже назрела в момент, когда игру закрывали, напоминать
-     сразу же незачем — человек только что всё видел сам. Даём отсрочку. */
-  const GRACE = { danger: 2 * 60_000, sick: 10 * 60_000, poop: 25 * 60_000 };
-  const GRACE_DEFAULT = 40 * 60_000;
-
+  /* Никаких отсрочек и переносов: время события — это время события. */
   function finish(found, name, now) {
     return Object.keys(found).map(key => {
       const t = NEED_TEXT[key] || { title: '{name} зовёт', body: 'Кажется, ему что-то нужно' };
-      let at = found[key];
-      if (at <= now + 1000) at = now + (GRACE[key] != null ? GRACE[key] : GRACE_DEFAULT);
       return {
         key,
-        at: shiftFromNight(at, key),
+        at: Math.max(found[key], now),
         title: t.title.replace('{name}', name),
         body: t.body,
         short: t.short || t.body
@@ -832,7 +868,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 4;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 5;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -877,7 +913,7 @@
         ? 'расписание: работало ' + ago(st.cron_at)
         : '<b>расписание ни разу не запускалось</b> — проверь Cron Trigger');
       rows.push('последнее уведомление: <b>' + ago(st.last_notify) + '</b>');
-      rows.push('за сегодня: ' + (st.notify_today || 0) + ' из 8');
+      rows.push('уведомлений за сегодня: ' + (st.notify_today || 0));
       if (st.next_call_at) rows.push('следующая проверка: ' + when(st.next_call_at));
       items.push({ type: 'info', icon: 'server', name: rows.join('<br>') });
     }
@@ -885,7 +921,7 @@
     items.push({ type: 'separator' });
     items.push(needs.length
       ? { type: 'info', icon: 'bell', name: needs.map(n => n.short + ' — ' + when(n.at)).join('<br>') }
-      : { type: 'info', icon: 'bell', name: 'напоминаний не запланировано' });
+      : { type: 'info', icon: 'bell', name: 'событий не запланировано' });
 
     items.push({ type: 'separator' });
     const stats = STAT_NAMES.map(([cur, max, label]) => {
@@ -921,8 +957,8 @@
     const soon = needs[0];
     const nextText = soon
       ? new Date(soon.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) +
-        ' — ' + soon.body.toLowerCase()
-      : 'пока не о чем напоминать';
+        ' — ' + soon.short
+      : 'пока ничего не запланировано';
 
     const items = [
       { type: 'info', name: state },
@@ -1002,7 +1038,7 @@
         _ignore: !online || !enabled(),
         type: 'info',
         icon: 'clock',
-        name: 'ближайшее напоминание: ' + nextText
+        name: 'ближайшее событие: ' + nextText
       },
       {
         icon: 'heart-pulse',
