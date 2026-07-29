@@ -28,6 +28,10 @@
   const LS_BG    = 'tama_skin_bg';
   const LS_SIZE  = 'tama_skin_size';       // доля ширины экрана, которую занимает корпус
   const LS_Y     = 'tama_skin_y';          // положение корпуса по вертикали, доля высоты
+  const LS_TRY   = 'tama_skin_building';   // сборка началась, но ещё не подтвердилась
+  /* Метка текущего запуска страницы. Нужна, чтобы отличить «сборка оборвалась
+     в прошлый раз» от «пересобираем прямо сейчас, второй раз подряд». */
+  const RUN = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   const NATURAL = 192;                     // штатный размер игрового экрана в точках
 
@@ -96,7 +100,10 @@
 
   /* ---------------------------------------------------------------------- */
   const CSS = `
-.skin-layer{position:fixed;inset:0;overflow:hidden;z-index:2;pointer-events:none;background:#0b0b0d;}
+.skin-layer{position:fixed;inset:0;overflow:hidden;z-index:2;background:#0b0b0d;
+  /* события ловим: и игровой экран, и кнопки лежат внутри этого же слоя,
+     а касания по фону нужны для аварийного выхода тремя касаниями */
+  pointer-events:auto;}
 
 /* фон отдельной картинкой (для корпусов вида «части») */
 .skin-bg{position:absolute;inset:0;background:50% 50% / cover no-repeat;}
@@ -115,8 +122,13 @@
 .skin-device.as-parts{
   left:50%;top:calc(var(--dev-y) * 100%);
   width:calc(var(--dev-size) * 100%);
+  /* высоту задаём соотношением сторон из описания, а НЕ размером картинки:
+     иначе не загрузившаяся картинка обнуляет высоту, вырез схлопывается,
+     и вместо игры остаётся чёрный экран без выхода */
+  aspect-ratio:var(--dev-ar);
   transform:translate(-50%,-50%);}
-.skin-device.as-parts > .skin-shell{display:block;width:100%;height:auto;
+.skin-device.as-parts > .skin-shell{position:absolute;inset:0;
+  display:block;width:100%;height:100%;
   user-select:none;-webkit-user-drag:none;
   /* тень идёт по силуэту корпуса, а не по прямоугольнику: сначала короткая
      и плотная у самой поверхности, потом длинная и мягкая */
@@ -228,6 +240,8 @@
       device.appendChild(img);
       device.style.setProperty('--dev-size', shellSize());
       device.style.setProperty('--dev-y', shellY());
+      device.style.setProperty('--dev-ar', (s.w / s.h).toFixed(5));
+      img.addEventListener('error', () => failSafe('картинка корпуса не загрузилась'));
       const left = (s.light || 'left-top') === 'left-top';
       device.style.setProperty('--sh1', (left ? '6px' : '-6px') + ' 8px 10px rgba(0,0,0,.45)');
       device.style.setProperty('--sh2', (left ? '18px' : '-18px') + ' 34px 42px rgba(0,0,0,.32)');
@@ -277,9 +291,51 @@
     root.classList.add('skin-on');
     refit();
     window.addEventListener('resize', refit);
-    const img = layer.querySelector('img');
-    if (img) img.addEventListener('load', refit);
+    const anyImg = layer.querySelector('img');
+    if (anyImg) {
+      anyImg.addEventListener('load', refit);
+      anyImg.addEventListener('error', () => failSafe('картинка не загрузилась'));
+    }
+
+    /* Аварийный выход без меню: три быстрых касания по фону возвращают
+       обычный корпус. Нужен на случай, если картинка не пришла и меню не
+       видно — иначе из чёрного экрана в приложении не выбраться. */
+    let taps = [];
+    layer.addEventListener('pointerdown', (e) => {
+      // касания по самому экрану и по кнопкам — это игра, их не считаем
+      if (e.target.closest && e.target.closest('.skin-screen, .skin-btn')) { taps = []; return; }
+      const now = Date.now();
+      taps = taps.filter(t => now - t < 1200);
+      taps.push(now);
+      if (taps.length >= 3) { taps = []; failSafe('три касания подряд'); }
+    }, true);
+
+    /* Через секунду проверяем, что получилось что-то работоспособное. */
+    setTimeout(verifyOrFail, 1000);
     return true;
+  }
+
+  /* Выключить фотокорпус и вернуть обычный вид. Ничего не ломает: настройка
+     просто выключается, игра продолжает работать. */
+  function failSafe(why) {
+    if (!layer && localStorage.getItem(LS_ON) !== '1') return;
+    console.warn('[skin] фотокорпус выключен: ' + why);
+    localStorage.setItem(LS_ON, '0');
+    localStorage.removeItem(LS_TRY);
+    if (layer) destroy();
+    try { App.displayPopup('Фотокорпус выключен: ' + why, 4000); } catch (e) {}
+  }
+
+  /* Экран должен быть виден и не схлопнут. Если нет — уходим в обычный вид. */
+  function verifyOrFail() {
+    if (!layer) return;
+    const scr = layer.querySelector('.skin-screen');
+    const r = scr && scr.getBoundingClientRect();
+    if (!r || r.width < 24 || r.height < 24) {
+      failSafe('не получилось разместить экран');
+      return;
+    }
+    localStorage.removeItem(LS_TRY);      // всё сложилось, метку снимаем
   }
 
   /* Подгоняем масштаб экрана и шаг пиксельной сетки. */
@@ -320,8 +376,20 @@
   }
 
   function apply() {
-    if (isOn()) { if (!layer) build(); else { destroy(); build(); } }
-    else if (layer) destroy();
+    if (!isOn()) { if (layer) destroy(); return; }
+
+    /* Метка осталась от ДРУГОГО запуска страницы — значит тогда сборка так и
+       не дошла до проверки, всё и сломалось. Второй раз в ту же яму не лезем.
+       Метка от текущего запуска — это просто пересборка, она в порядке. */
+    const mark = localStorage.getItem(LS_TRY);
+    if (mark && mark !== RUN) {
+      localStorage.removeItem(LS_TRY);
+      failSafe('в прошлый раз не получилось');
+      return;
+    }
+    localStorage.setItem(LS_TRY, RUN);
+    if (layer) destroy();
+    build();
   }
 
   /* ---------------------------------------------------------------------- */
@@ -411,6 +479,15 @@
     window.TamaExtraMenu.push(make);
   });
 
+  /* Аварийный выключатель через адрес: pbelyaev1.github.io/?noskin
+     Пригодится, если приложение открыть в обычном браузере. */
+  try {
+    if (/[?&#]noskin/.test(location.search + location.hash)) {
+      localStorage.setItem(LS_ON, '0');
+      localStorage.removeItem(LS_TRY);
+    }
+  } catch (e) {}
+
   /* Ждём, пока игра построит своё дерево, и только потом вмешиваемся. */
   (function waitGame(tries) {
     if (hasApp() && App.loadingEnded && document.querySelector('.graphics-wrapper')) { apply(); return; }
@@ -425,6 +502,7 @@
     bg:    id => { if (BACKGROUNDS[id]) { localStorage.setItem(LS_BG, id); apply(); } return bgId(); },
     size:  v  => { if (v) localStorage.setItem(LS_SIZE, String(v)); apply(); return shellSize(); },
     y:     v  => { if (v) localStorage.setItem(LS_Y, String(v)); apply(); return shellY(); },
+    off2:  () => failSafe('вручную'),
     rect:  () => { const el = layer && layer.querySelector('.skin-screen'); return el ? el.getBoundingClientRect() : null; },
     shells: SHELLS, backgrounds: BACKGROUNDS,
   };
