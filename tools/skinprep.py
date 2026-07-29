@@ -53,20 +53,36 @@ def pad_to_ratio(img, target):
 
 
 def cut_chroma(img):
-    """Убирает сплошной зелёный фон вокруг корпуса, оставляя мягкий край."""
-    a = np.asarray(img).astype(np.int16)
+    """Убирает сплошной зелёный фон вокруг корпуса.
+
+    Край делаем мягким, а не «или да, или нет»: у пикселей на границе зелень
+    подмешана частично, и если рубить порогом, силуэт получается зубчатым, а
+    вокруг остаётся ядовитая кайма. Поэтому:
+      • прозрачность считаем плавно по тому, насколько пиксель зелёный;
+      • саму зелень из полупрозрачных пикселей вычитаем (это называется despill);
+      • под полностью прозрачными обнуляем цвет, чтобы при уменьшении
+        картинки браузер не подмешал зелёный обратно.
+    """
+    a = np.asarray(img).astype(np.float32)
     r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
-    green = (g > 110) & (g - r > 45) & (g - b > 45)
-    if not green.any():
+
+    # насколько пиксель «зеленее» всего остального
+    spill = g - np.maximum(r, b)
+    if (spill > 60).mean() < 0.02:
         return img, False
 
-    out = np.asarray(img).copy()
-    out[:, :, 3] = np.where(green, 0, out[:, :, 3])
-    # по краю зелень подмешивается в пиксели корпуса — гасим её,
-    # иначе вокруг остаётся ядовитая кайма
-    edge = (~green) & (g.astype(np.int32) - np.maximum(r, b) > 18)
-    mix = np.maximum(r, b).astype(np.uint8)
-    out[:, :, 1] = np.where(edge, mix, out[:, :, 1])
+    LO, HI = 8.0, 55.0                       # ниже LO — корпус, выше HI — чистый фон
+    alpha = 1.0 - np.clip((spill - LO) / (HI - LO), 0, 1)
+
+    # despill: зелень в оставшихся пикселях опускаем до уровня соседних каналов
+    keep = alpha > 0
+    g2 = np.where(keep & (spill > 0), np.maximum(r, b) + np.minimum(spill, 6.0), g)
+
+    out = np.zeros(a.shape, dtype=np.uint8)
+    out[:, :, 0] = np.where(keep, r, 0).astype(np.uint8)
+    out[:, :, 1] = np.where(keep, g2, 0).astype(np.uint8)
+    out[:, :, 2] = np.where(keep, b, 0).astype(np.uint8)
+    out[:, :, 3] = (alpha * 255).astype(np.uint8)
     return Image.fromarray(out, 'RGBA'), True
 
 
