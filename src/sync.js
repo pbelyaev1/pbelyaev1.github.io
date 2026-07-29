@@ -22,7 +22,8 @@
     active: 'tama_sync_last_active',
     sound:  'tama_sound_in_silent',
     on:     'tama_sync_enabled',
-    reset:  'tama_reset_pending',   // «питомца сбросили, сервер об этом знает не наверняка»
+    reset:  'tama_reset_pending',   // «питомца сбросили, дело ещё не доведено до конца»
+    gen:    'tama_sync_gen',        // поколение питомца: растёт при каждом сбросе
   };
   const get = k => { try { return localStorage.getItem(k); } catch (e) { return null; } };
   const set = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
@@ -523,8 +524,10 @@
     schedulePush();
   }
 
-  async function pushSave(force) {
-    if (resetting) return { ok: false, msg: 'Идёт сброс питомца' };
+  async function pushSave(force, allowDuringReset) {
+    if ((resetting || get(LS.reset)) && !allowDuringReset) {
+      return { ok: false, msg: 'Идёт сброс питомца' };
+    }
     if (!enabled() || applying) return { ok: false, msg: 'Синхронизация выключена' };
     if (!hasApp() || !App.pet || !App.loadingEnded) return { ok: false, msg: 'Игра ещё не загрузилась' };
     if (busy) return { ok: false, msg: 'Уже отправляем' };
@@ -545,6 +548,7 @@
         body: JSON.stringify({
           save: code,
           hash,
+          gen: genNum(),                         // «к какому поколению питомца это относится»
           last_time: Date.now(),
           device: deviceId(),
           tz: -new Date().getTimezoneOffset(),   // сдвиг от UTC в минутах — сервер молчит по ночам
@@ -556,6 +560,12 @@
           pet_name: (App.petDefinition && App.petDefinition.name) || null
         })
       });
+      if (res.status === 409 && res.data && res.data.conflict === 'reset') {
+        /* Питомца сбросили на другом устройстве. Наше сохранение теперь от
+           прежней жизни — отправлять его нельзя, надо стереть у себя тоже. */
+        await adoptRemoteReset(res.data.gen);
+        return { ok: false, msg: 'Питомца сбросили на другом устройстве' };
+      }
       if (res.status === 409) {
         // мы отстали: на другом устройстве играли позже — забираем оттуда
         setTimeout(() => checkRemote(true), 600);
@@ -744,6 +754,11 @@
     }
     try {
       const { data } = await api('/api/meta');
+      // питомца начали заново на другом устройстве
+      if (data && data.gen && genNum() && data.gen !== genNum()) {
+        await adoptRemoteReset(data.gen);
+        return;
+      }
       if (!otherIsAhead(data)) return;
       lastPullAt = Date.now();
       await pullAndApply(false);
@@ -836,36 +851,72 @@
   /* ======================================================================
      Сброс питомца
 
-     «Сбросить данные питомца» в меню стирает питомца только в браузере и
-     перезагружает страницу. Сервер об этом не знал: он продолжал считать
-     старого питомца и при следующем запуске отдавал новому яйцу его
-     состояние — отсюда чужие какашки рядом со свежим яйцом, а изредка и
-     целиком старый питомец (это уже полное сохранение возвращалось назад).
+     Раньше игра стирала питомца только у себя и тут же перезагружалась.
+     Сервер об этом не знал и продолжал жить со старым питомцем: новому яйцу
+     доставались его характеристики и какашки, уведомления шли по старому
+     расписанию, а второе устройство при случае возвращало и всё сохранение
+     целиком.
 
-     Поэтому: перехватываем сам момент удаления, говорим серверу «забудь»,
-     и до тех пор, пока он не подтвердит, не берём оттуда ничего.
+     Теперь сброс — это одно определённое действие в определённом порядке:
+       1. сказать серверу «забудь» и дождаться ответа;
+       2. сервер поднимает номер поколения — всё, что было отправлено до
+          этого, он больше не примет (в том числе запрос, зависший в пути,
+          и вкладка на другом устройстве, которая ещё не знает о сбросе);
+       3. только потом стереть питомца в браузере;
+       4. и только потом перезагрузиться.
+
+     Пока дело не доведено до конца, метка в localStorage держит обмен
+     закрытым: с сервера ничего не берём и ничего туда не шлём.
      ====================================================================== */
   let resetting = false;
 
-  function serverReset(full) {
-    resetting = true;
-    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
-    drop(LS.hash);
-    set(LS.reset, full ? 'full' : '1');
-    const t = token() || lastToken;
-    if (!server() || !t) return;
+  const genNum = () => Number(get(LS.gen)) || 0;
+  const setGen = g => { if (g) set(LS.gen, String(g)); };
+
+  /* Стереть питомца в браузере — ровно то же, что делает пункт меню. */
+  async function wipeLocalPet(full) {
     try {
-      /* keepalive: запрос должен уйти, даже если страница уже перезагружается */
-      fetch(server() + '/api/reset', {
-        method: 'POST',
-        keepalive: true,
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + t },
-        body: JSON.stringify({ full: !!full })
-      }).then(r => { if (r && r.ok && !full) drop(LS.reset); }).catch(() => {});
+      if (full) localStorage.clear();
+      else { localStorage.removeItem('pet'); localStorage.removeItem('last_time'); }
     } catch (e) {}
+    try {
+      if (!window.idbKeyval) return;
+      if (full) await window.idbKeyval.clear();
+      else await window.idbKeyval.delMany(['last_time', 'pet']);
+    } catch (e) { console.warn('[sync] локально стереть не вышло:', e); }
   }
 
-  /* Игра стирает питомца через idbKeyval — на этом и ловим, не трогая App.js. */
+  async function serverResetRequest(full) {
+    const t = token() || lastToken;
+    if (!server() || !t) throw new Error('Сервер не задан');
+    const r = await fetch(server() + '/api/reset', {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + t },
+      body: JSON.stringify({ full: !!full })
+    });
+    if (!r.ok) throw new Error('Сервер ответил ' + r.status);
+    const data = await r.json().catch(() => null);
+    if (data && data.gen) setGen(data.gen);
+    return data;
+  }
+
+  /* Пометить, что сброс начался, и сказать серверу — не дожидаясь ответа.
+     Используется подстраховкой: страница в этот момент может уже уходить
+     на перезагрузку, ждать нечего. */
+  function markReset(full) {
+    if (resetting) return;
+    resetting = true;
+    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    set(LS.reset, full ? 'full' : '1');
+    drop(LS.hash);
+    serverResetRequest(full).catch(() => {});
+  }
+
+  /* Подстраховка: если питомца сотрут не через наш пункт меню (другой кнопкой,
+     чужим кодом, очисткой данных сайта), мы всё равно об этом узнаем. Метка
+     останется, и следующий запуск доведёт сброс до сервера. Без этого сервер
+     продолжил бы жить со старым питомцем и отдал бы его новому яйцу. */
   function hookReset() {
     const idb = window.idbKeyval;
     if (!idb || idb.__tamaSyncReset) return false;
@@ -873,34 +924,81 @@
       const orig = idb[name];
       if (typeof orig !== 'function') return;
       idb[name] = function () {
-        try { if (isReset(arguments)) serverReset(full); } catch (e) {}
+        try { if (isReset(arguments)) markReset(full); } catch (e) {}
         return orig.apply(this, arguments);
       };
     };
     wrap('delMany', a => Array.isArray(a[0]) && a[0].indexOf('pet') !== -1, false);
     wrap('del',     a => a[0] === 'pet', false);
-    wrap('clear',   () => true, true);            // «полный сброс» из меню
+    wrap('clear',   () => true, true);
     idb.__tamaSyncReset = true;
     return true;
+  }
+
+  /* Полный ход сброса. Вызывается из пункта меню. */
+  async function doReset(full) {
+    resetting = true;
+    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    try { App.save = () => {}; } catch (e) {}     // игра больше ничего не пишет
+    set(LS.reset, full ? 'full' : '1');
+    drop(LS.hash);
+
+    try { App.displayPopup('сбрасываю…', App.INF); } catch (e) {}
+
+    /* Сначала сервер. Ждём ответа, но не вечно: без сети сброс всё равно
+       состоится, а до сервера его доведёт следующий запуск игры. */
+    let told = false;
+    try {
+      await Promise.race([
+        serverResetRequest(full).then(() => { told = true; }),
+        wait(5000)
+      ]);
+    } catch (e) { console.warn('[sync] сервер о сбросе не узнал:', e.message); }
+
+    await wipeLocalPet(full);
+    if (told && !full) drop(LS.reset);            // всё уже сделано как надо
+
+    setTimeout(() => location.reload(), 500);
   }
 
   /* Если сброс не доехал до сервера (не было сети), доводим дело до конца
      при следующем запуске — и только потом разрешаем обмен. */
   async function finishPendingReset() {
-    const flag = get(LS.reset);
-    if (!flag) return false;
+    if (!get(LS.reset)) return false;
     try {
       await ensureAccount();
-      await api('/api/reset', { method: 'POST', body: JSON.stringify({ full: false }) });
-      drop(LS.reset);
+      const data = await api('/api/reset', { method: 'POST', body: JSON.stringify({ full: false }) });
+      if (data && data.data && data.data.gen) setGen(data.data.gen);
       drop(LS.hash);
       await resubscribePush();      // после полного сброса токен новый — подписку надо перевесить
-      await pushSave(true);         // на сервере теперь лежит именно новый питомец
+      let res = null;
+      for (let i = 0; i < 5; i++) {
+        res = await pushSave(true, true);         // на сервере теперь именно новый питомец
+        if (res.ok) break;
+        await wait(2000);
+      }
+      if (!res || !res.ok) throw new Error(res ? res.msg : 'не отправилось');
+      drop(LS.reset);
       console.log('[sync] сброс питомца доведён до сервера');
     } catch (e) {
       console.warn('[sync] сброс до сервера пока не дошёл:', e.message);
     }
     return true;
+  }
+
+  /* Питомца сбросили на другом устройстве. Здесь у нас на руках сохранение
+     от прежней жизни — его надо стереть, иначе оно вернётся на сервер. */
+  async function adoptRemoteReset(newGen) {
+    if (resetting) return;
+    resetting = true;
+    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    setGen(newGen);
+    drop(LS.hash);
+    try { App.save = () => {}; } catch (e) {}
+    try { App.displayPopup('питомца начали заново', App.INF); } catch (e) {}
+    console.log('[sync] питомца сбросили на другом устройстве — стираем и здесь');
+    await wipeLocalPet(false);
+    setTimeout(() => location.reload(), 500);
   }
 
   /* Перевешивает уже выданную браузером подписку на текущий токен. */
@@ -924,12 +1022,26 @@
   async function ensureAccount() {
     if (token()) return true;
     const { data } = await api('/api/register', { method: 'POST' });
-    if (data && data.token) { set(LS.token, data.token); return true; }
+    if (data && data.token) { set(LS.token, data.token); setGen(data.gen || 1); return true; }
     return false;
+  }
+
+  /* Дожидаемся, пока игра действительно загрузится. Раньше запуск был просто
+     «через шесть секунд»: если страница грузилась дольше (а после сброса и
+     перезагрузки так и бывает), первое сохранение молча не уходило, и на
+     сервере какое-то время не было вообще ничего. */
+  async function waitForGame(limitMs) {
+    const until = Date.now() + (limitMs || 90000);
+    while (Date.now() < until) {
+      if (hasApp() && App.pet && App.loadingEnded) return true;
+      await wait(400);
+    }
+    return hasApp() && !!App.pet && !!App.loadingEnded;
   }
 
   async function boot() {
     if (!enabled()) return;
+    if (!(await waitForGame())) { console.warn('[sync] игра так и не загрузилась'); return; }
     /* Питомца только что сбросили: с сервера сейчас брать нечего и незачем —
        там либо уже пусто, либо ещё лежит старый, которого мы стёрли. */
     if (get(LS.reset)) {
@@ -937,6 +1049,22 @@
       await finishPendingReset();
       return;
     }
+    /* Сначала выясняем поколение: вдруг питомца начали заново на другом
+       устройстве, пока это лежало выключенным. Тогда брать здесь нечего —
+       наше сохранение от прежней жизни. */
+    let meta = null;
+    try {
+      await ensureAccount();
+      meta = (await api('/api/meta')).data;
+      if (meta && meta.gen) {
+        const mine = genNum();
+        if (!mine) setGen(meta.gen);
+        else if (meta.gen !== mine) { await adoptRemoteReset(meta.gen); return; }
+      }
+    } catch (e) {
+      console.warn('[sync] недоступна:', e.message);
+    }
+
     if (serverSim()) {
       try { await adoptServerState(); }
       catch (e) {
@@ -950,13 +1078,18 @@
       }
     }
     try {
-      await ensureAccount();
-      const { data } = await api('/api/meta');
+      const data = meta || (await api('/api/meta')).data;
       if (otherIsAhead(data)) {
         const res = await pullAndApply(false);
         if (res.ok) return;
       }
-      await pushSave(true);
+      /* Первое сохранение после запуска — важное: пока его нет, сервер не знает
+         о питомце вообще. Поэтому не «попробовали и забыли», а до победы. */
+      for (let i = 0; i < 5; i++) {
+        const res = await pushSave(true);
+        if (res.ok) break;
+        await wait(2000);
+      }
     } catch (e) {
       console.warn('[sync] недоступна:', e.message);
     }
@@ -1056,14 +1189,19 @@
   setInterval(() => { if (document.visibilityState === 'visible') checkRemote(); }, 25000);
   setInterval(() => pushSave(false), 60000);
 
-  /* Перехват сброса вешаем сразу и продолжаем пытаться, пока idb-keyval
-     не загрузится: меню могут открыть раньше, чем дойдут руки до boot(). */
+  /* Подстраховку вешаем сразу, не дожидаясь запуска: меню могут открыть
+     раньше, чем игра догрузится. */
   (function waitIdb(tries) {
-    if (hookReset() || tries > 200) return;
+    if (hookReset() || tries > 300) return;
     setTimeout(() => waitIdb(tries + 1), 50);
   })(0);
 
-  setTimeout(() => { ensureSpeedSetting(); hookSave(); boot(); }, 6000);
+  setTimeout(async () => {
+    await waitForGame();
+    ensureSpeedSetting();
+    hookSave();
+    boot();
+  }, 2000);
 
   /* ======================================================================
      Экран в настройках игры
@@ -1120,7 +1258,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 10;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 11;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -1299,6 +1437,16 @@
         name: 'что с питомцем',
         onclick: () => { openDiagnostics(); return true; }
       },
+      /* Видно сразу, какая версия где стоит: без этого при странном поведении
+         приходится гадать, обновились ли игра и Cloudflare. */
+      {
+        type: 'info',
+        icon: 'circle-info',
+        name: 'игра ' + (typeof VERSION !== 'undefined' ? VERSION : '?') +
+              ' · сервер ' + (err ? 'нет связи' : (st && st.v) || '?') +
+              ' · нужен ' + SERVER_VERSION +
+              ' · поколение ' + (genNum() || '—')
+      },
       {
         icon: 'power-off',
         name: enabled() ? 'приостановить' : 'возобновить',
@@ -1440,8 +1588,39 @@
     };
   }
 
+  /* Пункты сброса делаем своими: важен порядок действий — сначала сервер,
+     потом стирание, потом перезагрузка. В исходной игре порядок другой,
+     и из-за этого старый питомец возвращался обратно. */
+  const RESET_PET = /reset pet data|сбросить данные питомца/i;
+  const RESET_ALL = /factory reset|сброс до заводских/i;
+
+  function resetItem(orig, full) {
+    return {
+      ...orig,
+      onclick: () => {
+        App.displayConfirm(full
+          ? 'Стереть вообще всё: питомца, достижения, вещи и настройки?'
+          : 'Начать заново с новым яйцом? Питомец будет стёрт и здесь, и на сервере.', [
+          {
+            name: full ? 'да, стереть всё' : 'да, начать заново',
+            onclick: () => { doReset(full); return false; }
+          },
+          { name: 'отмена', class: 'back-btn', onclick: () => {} }
+        ]);
+        return true;
+      }
+    };
+  }
+
   function inject(items) {
-    const copy = items.filter(it => !(typeof it.name === 'string' && DROP_FROM_SETTINGS.test(it.name)));
+    const copy = items
+      .filter(it => !(typeof it.name === 'string' && DROP_FROM_SETTINGS.test(it.name)))
+      .map(it => {
+        if (typeof it.name !== 'string') return it;
+        if (RESET_PET.test(it.name)) return resetItem(it, false);
+        if (RESET_ALL.test(it.name)) return resetItem(it, true);
+        return it;
+      });
     let at = copy.findIndex(it => typeof it.name === 'string' && /save management|управление сохранени/i.test(it.name));
     if (at === -1) at = copy.findIndex(it => typeof it.name === 'string' && /manual save|сохранить вручную/i.test(it.name));
     copy.splice(at === -1 ? 0 : at + 1, 0, menuItem(), soundItem(), speedItem(), modeItem());
@@ -1488,7 +1667,11 @@
     async link(code) {
       try {
         const { data } = await api('/api/link', { method: 'POST', body: JSON.stringify({ code: String(code || '').trim() }) });
-        if (data && data.token) { set(LS.token, data.token); set(LS.on, '1'); set(LS.hash, ''); return true; }
+        if (data && data.token) {
+          set(LS.token, data.token); set(LS.on, '1'); set(LS.hash, '');
+          setGen(data.gen || 1);
+          return true;
+        }
       } catch (e) { console.warn(e.message); }
       return false;
     },
