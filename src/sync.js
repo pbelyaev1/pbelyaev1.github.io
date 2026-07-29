@@ -1090,6 +1090,11 @@
         if (res.ok) break;
         await wait(2000);
       }
+      /* Подписка на уведомления живёт в браузере, а сервер помнит её отдельно.
+         Эти два списка умеют расходиться: сменился токен, чистили базу, сбой.
+         Тогда в игре написано «уведомления включены», а слать их некому.
+         Поэтому при каждом запуске молча подтверждаем подписку серверу. */
+      await resubscribePush();
     } catch (e) {
       console.warn('[sync] недоступна:', e.message);
     }
@@ -1258,7 +1263,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 11;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 12;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -1298,22 +1303,54 @@
       });
     } else {
       const rows = [];
-      rows.push('уведомления здесь: <b>' + notif + '</b>');
+      /* Главное — сколько устройств реально подписано. Без подписки сервер
+         физически ничего прислать не может, и это надо говорить прямо. */
+      if (!st.subs) {
+        rows.push('<b>уведомления никуда не приходят: подписки нет.</b> ' +
+                  'Включи их в меню «синхронизация».');
+      } else {
+        rows.push('уведомления включены на устройствах: <b>' + st.subs + '</b>' +
+                  (notif === 'включены' ? ' (это в их числе)' : ' (но не на этом)'));
+      }
+      if (st.last_error) rows.push('последняя загвоздка: <b>' + st.last_error + '</b>');
       rows.push(st.cron_at
         ? 'расписание: работало ' + ago(st.cron_at)
         : '<b>расписание ни разу не запускалось</b> — проверь Cron Trigger');
-      rows.push('последнее уведомление: <b>' + ago(st.last_notify) + '</b>');
-      rows.push('уведомлений за сегодня: ' + (st.notify_today || 0));
+      rows.push('последнее <b>доставленное</b> уведомление: ' + ago(st.last_notify));
+      rows.push('доставлено за сегодня: ' + (st.notify_today || 0));
       rows.push('счёт: <b>' + (st.mode === 'server' ? 'на сервере' : 'в игре') + '</b>');
       if (st.mode === 'server') rows.push('питомец досчитан: ' + ago(st.sim_at));
-      if (st.next_call_at) rows.push('следующая проверка: ' + when(st.next_call_at));
       items.push({ type: 'info', icon: 'server', name: rows.join('<br>') });
     }
 
     items.push({ type: 'separator' });
+    /* Рядом с каждой строкой — то самое число, по которому принято решение.
+       Так видно, что это не выдумка: сытость 39 при пороге 40 и есть «голоден». */
+    const FACT = {
+      hunger:  () => 'сытость ' + Math.round(st0.current_hunger) + ' из ' + (st0.hunger_min_desire ?? 40),
+      fun:     () => 'настроение ' + Math.round(st0.current_fun) + ' из ' + (st0.fun_min_desire ?? 35),
+      sleep:   () => 'бодрость ' + Math.round(st0.current_sleep) + ' из ' + (st0.sleep_min_desire ?? 20),
+      toilet:  () => 'пузырь ' + Math.round(st0.current_bladder) + ' из ' + Math.round((st0.max_bladder || 100) / 4),
+      clean:   () => 'чистота ' + Math.round(st0.current_cleanliness) + ' из 25',
+      sick:    () => 'здоровье ' + Math.round(st0.current_health) + ' из ' + Math.round((st0.max_health || 100) * 0.25),
+      danger:  () => 'здоровье ' + Math.round(st0.current_health) + ' из ' + Math.round((st0.max_health || 100) * 0.1),
+      poop:    () => 'какашек ' + (st0.has_poop_out || 0),
+    };
     items.push(needs.length
-      ? { type: 'info', icon: 'bell', name: needs.map(n => n.short + ' — ' + when(n.at)).join('<br>') }
-      : { type: 'info', icon: 'bell', name: 'событий не запланировано' });
+      ? {
+          type: 'info', icon: 'bell',
+          name: needs.map(n => {
+            const fact = FACT[n.key] ? ' <small>(' + FACT[n.key]() + ')</small>' : '';
+            return n.short + ' — ' + when(n.at) + fact;
+          }).join('<br>')
+        }
+      : { type: 'info', icon: 'bell', name: 'сейчас питомцу ничего не нужно' });
+
+    items.push({
+      type: 'info',
+      name: '<small>Пока игра открыта, напоминания не приходят — ты и так всё видишь. ' +
+            'Они начнут приходить через пару минут после того, как закроешь приложение.</small>'
+    });
 
     items.push({ type: 'separator' });
     const stats = STAT_NAMES.map(([cur, max, label]) => {
@@ -1343,14 +1380,18 @@
     if (err) state = 'нет связи с сервером';
     else if (outdated) state = 'на Cloudflare старая версия сервера — уведомления не работают';
     else if (!enabled()) state = 'синхронизация приостановлена';
+    else if (st && !st.subs) state = 'сервер на связи, но уведомления никуда не приходят — подписки нет';
     else state = 'сервер на связи' + (st && st.has_save ? ', сохранение есть' : ', сохранения ещё нет');
 
     const needs = collectNeeds();
     const soon = needs[0];
-    const nextText = soon
-      ? new Date(soon.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) +
-        ' — ' + soon.short
-      : 'пока ничего не запланировано';
+    /* Событие, которое уже наступило, — это «прямо сейчас», а не время на
+       часах: показывать в такой строке текущее время бессмысленно. */
+    const nextText = !soon
+      ? 'пока ничего не нужно'
+      : (soon.at - Date.now() <= 60000
+          ? 'прямо сейчас — ' + soon.short
+          : when(soon.at) + ' — ' + soon.short);
 
     const items = [
       { type: 'info', name: state },
@@ -1430,7 +1471,7 @@
         _ignore: !online || !enabled(),
         type: 'info',
         icon: 'clock',
-        name: 'ближайшее событие: ' + nextText
+        name: 'питомцу нужно: ' + nextText
       },
       {
         icon: 'heart-pulse',
