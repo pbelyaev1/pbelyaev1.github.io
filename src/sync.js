@@ -106,8 +106,19 @@
     catch (e) { const h = date.getHours(); return h >= 21 || h < 8; }
   }
 
+  /* Что важнее чего. Заодно решает ничьи: если два дела назрели к одному
+     времени, первым показываем и отправляем то, что серьёзнее. */
+  const PRIORITY = ['danger', 'sick', 'hunger', 'toilet', 'poop', 'fun', 'sleep', 'clean', 'misbehave', 'egg'];
+  const rank = k => { const i = PRIORITY.indexOf(k); return i < 0 ? 99 : i; };
+
+  /* Про болезнь и угрозу жизни будим в любое время суток: питомец может не
+     дожить до утра. Остальное ночью не срочно. */
+  const CRITICAL = ['danger', 'sick'];
+  const isCritical = k => CRITICAL.indexOf(k) !== -1;
+
   /* ночью не будим: переносим на 9:30 утра */
-  function shiftFromNight(ms) {
+  function shiftFromNight(ms, key) {
+    if (isCritical(key)) return ms;
     const d = new Date(ms), h = d.getHours();
     if (h >= 22 || h < 9) {
       const m = new Date(ms);
@@ -182,7 +193,8 @@
       if (poop > 0) mark('poop', at);
       if (clean <= T.clean) mark('clean', at);
       if (health <= T.sick) mark('sick', at);
-      if (health <= T.danger) mark('danger', at);
+      // отсчёт до смерти в игре запускается, когда всё это разом на нуле
+      if (health <= T.danger || (health <= 0 && clean <= 0 && fun <= 0 && hunger <= 0)) mark('danger', at);
 
       // шаг вперёд
       hunger = Math.max(0, hunger - r.hunger * mult * dt);
@@ -217,7 +229,7 @@
 
   /* Если потребность уже назрела в момент, когда игру закрывали, напоминать
      сразу же незачем — человек только что всё видел сам. Даём отсрочку. */
-  const GRACE = { danger: 5 * 60_000, sick: 15 * 60_000, poop: 25 * 60_000 };
+  const GRACE = { danger: 2 * 60_000, sick: 10 * 60_000, poop: 25 * 60_000 };
   const GRACE_DEFAULT = 40 * 60_000;
 
   function finish(found, name, now) {
@@ -227,12 +239,12 @@
       if (at <= now + 1000) at = now + (GRACE[key] != null ? GRACE[key] : GRACE_DEFAULT);
       return {
         key,
-        at: shiftFromNight(at),
+        at: shiftFromNight(at, key),
         title: t.title.replace('{name}', name),
         body: t.body,
         short: t.short || t.body
       };
-    }).sort((a, b) => a.at - b.at);
+    }).sort((a, b) => (a.at - b.at) || (rank(a.key) - rank(b.key)));
   }
 
   /* ======================================================================
@@ -820,7 +832,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 3;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 4;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -840,48 +852,50 @@
   }
 
   async function openDiagnostics() {
-    const s = hasApp() && App.pet && App.pet.stats;
-    if (!s) return App.displayList([{ type: 'info', name: 'питомец ещё не загрузился' }]);
-
-    const rows = STAT_NAMES.map(([cur, max, label]) => {
-      const v = Math.round((s[cur] / (s[max] || 100)) * 100);
-      return label + ': <b>' + v + '%</b>';
-    });
-    rows.push('спит: <b>' + (s.is_sleeping ? 'да' : 'нет') + '</b>');
-    if (s.has_poop_out) rows.push('какашек: <b>' + s.has_poop_out + '</b>');
-    if (s.is_misbehaving) rows.push('<b>балуется</b>');
-
-    const needs = collectNeeds();
+    const st0 = hasApp() && App.pet && App.pet.stats;
+    if (!st0) return App.displayList([{ type: 'info', name: 'питомец ещё не загрузился' }]);
 
     let st = null, err = null;
     try { st = (await api('/api/status')).data; } catch (e) { err = e.message; }
+    const notif = await notificationState();
+    const needs = collectNeeds();
 
-    const items = [{ type: 'info', name: rows.join('<br>') }];
+    const items = [];
 
+    /* Сначала — то, ради чего сюда и заходят: работают ли уведомления. */
     if (err) {
       items.push({ type: 'info', icon: 'triangle-exclamation', name: 'сервер недоступен: ' + err });
     } else if (!st || !st.v || st.v < SERVER_VERSION) {
       items.push({
         type: 'info', icon: 'triangle-exclamation',
-        name: '<b>На Cloudflare старая версия сервера.</b> Уведомления не будут приходить, пока не заменишь код воркера на свежий и не нажмёшь Deploy.'
+        name: '<b>На Cloudflare старая версия сервера.</b> Замени код воркера на свежий и нажми Deploy, иначе уведомления работать не будут.'
       });
     } else {
-      const cron = st.cron_at
+      const rows = [];
+      rows.push('уведомления здесь: <b>' + notif + '</b>');
+      rows.push(st.cron_at
         ? 'расписание: работало ' + ago(st.cron_at)
-        : '<b>расписание ни разу не запускалось</b> — проверь Cron Trigger в настройках воркера';
-      items.push({
-        type: 'info', icon: 'server',
-        name: cron +
-              '<br>последнее уведомление: ' + ago(st.last_notify) +
-              '<br>за сегодня: ' + (st.notify_today || 0) + ' из 8' +
-              (st.next_call_at ? '<br>следующая проверка: ' + when(st.next_call_at) : '')
-      });
+        : '<b>расписание ни разу не запускалось</b> — проверь Cron Trigger');
+      rows.push('последнее уведомление: <b>' + ago(st.last_notify) + '</b>');
+      rows.push('за сегодня: ' + (st.notify_today || 0) + ' из 8');
+      if (st.next_call_at) rows.push('следующая проверка: ' + when(st.next_call_at));
+      items.push({ type: 'info', icon: 'server', name: rows.join('<br>') });
     }
 
     items.push({ type: 'separator' });
     items.push(needs.length
-      ? { type: 'info', icon: 'bell', name: needs.map(n => n.body.toLowerCase() + ' — ' + when(n.at)).join('<br>') }
+      ? { type: 'info', icon: 'bell', name: needs.map(n => n.short + ' — ' + when(n.at)).join('<br>') }
       : { type: 'info', icon: 'bell', name: 'напоминаний не запланировано' });
+
+    items.push({ type: 'separator' });
+    const stats = STAT_NAMES.map(([cur, max, label]) => {
+      const v = Math.round((st0[cur] / (st0[max] || 100)) * 100);
+      return label + ': <b>' + v + '%</b>';
+    });
+    stats.push('спит: <b>' + (st0.is_sleeping ? 'да' : 'нет') + '</b>');
+    if (st0.has_poop_out) stats.push('какашек: <b>' + st0.has_poop_out + '</b>');
+    if (st0.is_misbehaving) stats.push('<b>балуется</b>');
+    items.push({ type: 'info', name: stats.join('<br>') });
 
     return App.displayList(items);
   }
