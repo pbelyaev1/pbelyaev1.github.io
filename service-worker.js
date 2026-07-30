@@ -42,6 +42,7 @@ const ASSETS = [
   "resources/img/skins/bg_wood.jpg",
   "resources/img/skins/scene_desk.jpg",
   "resources/img/skins/scene_leaves.jpg",
+  "resources/img/skins/scene_space.jpg",
   "resources/font/PixelifySans-RU.ttf",
   // libs
   "src/libs/moment.js",
