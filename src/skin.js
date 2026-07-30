@@ -2,20 +2,24 @@
    Фотокорпус.
 
    Корпус в игре нарисован средствами CSS — фотореализма из него не выжать.
-   Здесь другой подход: отдельная картинка корпуса с прозрачным фоном лежит
-   поверх отдельной картинки фона, а на месте экрана у корпуса вырезана дырка,
-   в которую смотрит игровой холст.
+   Здесь два способа заменить его фотографией.
 
-   Слои снизу вверх:
-       1. фон — картинка на весь экран;
-       2. корпус — картинка с прозрачным фоном, тень рисуется по его силуэту;
-       3. игровой холст — в вырезе экрана;
-       4. стекло: блик, внутренняя тень, пиксельная сетка;
-       5. невидимые кнопки поверх нарисованных на корпусе.
+   1. ГОТОВАЯ СЦЕНА (kind: 'scene'). Одна настоящая фотография: корпус, стол,
+      свет, тень и глубина резкости уже сняты вместе. Игровой холст
+      накладывается точно в четырёхугольник экрана на фото — проективным
+      преобразованием, поэтому наклон корпуса учитывается. Выглядит лучше
+      всего, зато экран получается только такой, какой он на фотографии.
 
-   Игровой холст НЕ растягивается под вырез: он остаётся штатного размера
-   192×192 и целиком уменьшается одним преобразованием. Иначе меню и текст
-   верстаются по другой ширине и разъезжаются.
+   2. КОРПУС ИЗ ЧАСТЕЙ. Картинка корпуса с прозрачным фоном лежит поверх
+      отдельной картинки фона, на месте экрана — дырка, тень рисуется по
+      силуэту. Фоны и корпуса сочетаются как угодно, размер экрана любой.
+
+      Слои снизу вверх: фон → тень → корпус → игровой холст в вырезе →
+      стекло (блик, внутренняя тень, пиксельная сетка) → невидимые кнопки.
+
+   В ОБОИХ случаях игровой холст НЕ растягивается под вырез: он остаётся
+   штатного размера 192×192, а преобразование применяется целиком. Иначе меню
+   и текст верстаются по другой ширине и разъезжаются.
 
    Всё управление — в одном пункте настроек «фотокорпус», который открывает
    свой экран. В общем списке настроек игры добавляется ровно одна строка.
@@ -64,6 +68,38 @@
     },
   };
 
+  /* ---------------------------------------------------------------------- */
+  /* Готовые сцены. Здесь корпус, стол, свет и тень — одна настоящая
+     фотография, ничего не собирается из частей. Игровой экран накладывается
+     ровно в четырёхугольник экрана на фото, с учётом перспективы.
+
+     quad — углы экрана на фотографии, в её пикселях, по часовой стрелке
+     начиная с левого верхнего. buttons — доли от размера фотографии.       */
+  /* ---------------------------------------------------------------------- */
+  const SCENES = {
+    desk: {
+      name: 'фото на столе',
+      kind: 'scene',
+      image: 'resources/img/skins/scene_desk.jpg',
+      w: 852, h: 1846,
+      /* углы на пару точек шире настоящего экрана: наложение должно закрыть
+         его целиком, иначе по краю проглядывает картинка с фотографии */
+      quad: [[296, 862], [564, 863], [565, 1125], [295, 1124]],
+      radius: 0.030,
+      buttons: [
+        { x: 0.36854, y: 0.61810, w: 0.06103, h: 0.02817 },   // левая
+        { x: 0.47418, y: 0.63109, w: 0.06103, h: 0.02871 },   // средняя
+        { x: 0.57981, y: 0.61864, w: 0.06103, h: 0.02817 },   // правая
+      ],
+      zooms: [1.00, 0.80, 0.65],
+    },
+  };
+
+  /* Сцена идёт первой: для нового телефона это вид по умолчанию — он
+     реалистичнее, чем корпус, собранный из частей. */
+  const ALL = Object.assign({}, SCENES, SHELLS);
+  const isScene = s => s && s.kind === 'scene';
+
   const BACKGROUNDS = {
     wood: { name: 'дерево', image: 'resources/img/skins/bg_wood.jpg' },
     none: { name: 'нет',    image: null },
@@ -83,9 +119,9 @@
   const set = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
   const drop = k => { try { localStorage.removeItem(k); } catch (e) {} };
 
-  const shellId = () => (SHELLS[get(LS_SHELL)] ? get(LS_SHELL) : Object.keys(SHELLS)[0]);
+  const shellId = () => (ALL[get(LS_SHELL)] ? get(LS_SHELL) : Object.keys(ALL)[0]);
   const bgId    = () => (BACKGROUNDS[get(LS_BG)] ? get(LS_BG) : Object.keys(BACKGROUNDS)[0]);
-  const shell      = () => SHELLS[shellId()];
+  const shell      = () => ALL[shellId()];
   const background = () => BACKGROUNDS[bgId()];
   const isOn = () => get(LS_ON) === '1';
 
@@ -93,7 +129,8 @@
     const v = parseFloat(get(key));
     return (v >= lo && v <= hi) ? v : def;
   };
-  const zoom      = () => num(LS_ZOOM, 1, 0.5, 2);
+  const zooms     = () => shell().zooms || ZOOMS;
+  const zoom      = () => num(LS_ZOOM, zooms()[0], 0.4, 2);
   const shellY    = () => num(LS_Y, shell().offsetY || 0.5, 0.2, 0.8);
   /* Сколько получилось на самом деле: на узком экране корпус может не влезть
      в запрошенный масштаб, и врать об этом в меню не надо. */
@@ -161,6 +198,27 @@
     rgba(255,255,255,.26) 0%, rgba(255,255,255,.10) 26%,
     rgba(255,255,255,0) 46%, rgba(255,255,255,0) 100%);}
 
+/* готовая сцена: одна фотография, на которой уже есть и корпус, и стол,
+   и свет, и тень. Экран накладывается в четырёхугольник экрана на фото. */
+.skin-scene{position:absolute;overflow:hidden;}
+.skin-photo{position:absolute;inset:0;width:100%;height:100%;display:block;
+  user-select:none;-webkit-user-drag:none;}
+/* коробка штатного размера 192×192, вписанная в четырёхугольник экрана.
+   Преобразование ставит скрипт: это проекция, а не простое уменьшение. */
+.skin-warp{position:absolute;left:0;top:0;width:${NATURAL}px;height:${NATURAL}px;
+  transform-origin:0 0;overflow:hidden;background:#111018;
+  /* сглаживаем края наложения, чтобы не выпирал угол поверх бортика */
+  border-radius:var(--wrad, 0);}
+/* Стекло у сцены скромнее, чем у корпуса из частей: свет и отражения уже есть
+   на фотографии, от нас нужно только посадить наложение внутрь бортика —
+   тень по краю и еле заметный тёплый налёт, чтобы экран не был «наклейкой». */
+.skin-warp:after{content:"";position:absolute;inset:0;pointer-events:none;
+  border-radius:inherit;
+  background:linear-gradient(155deg, rgba(255,244,225,.16) 0%,
+    rgba(255,240,220,.05) 22%, rgba(0,0,0,0) 45%, rgba(0,0,0,.05) 100%);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.18),
+             inset 0 3px 7px rgba(0,0,0,.34), inset 0 -2px 5px rgba(0,0,0,.18);}
+
 .skin-btn{position:absolute;pointer-events:auto;background:transparent;border:0;padding:0;
   border-radius:50%;-webkit-tap-highlight-color:transparent;
   left:calc(var(--bx) * 100%);top:calc(var(--by) * 100%);
@@ -191,7 +249,152 @@
   /* ---------------------------------------------------------------------- */
   let layer = null, home = null, homeNext = null;
 
+  /* Холст переезжает в указанную коробку; откуда взяли — запоминаем. */
+  function moveCanvasInto(box) {
+    const gw = document.querySelector('.graphics-wrapper');
+    if (!gw) return;
+    home = gw.parentNode;
+    homeNext = gw.nextSibling;
+    box.appendChild(gw);
+  }
+
+  function addButtons(host, list) {
+    (list || []).forEach((b, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'skin-btn';
+      btn.setAttribute('aria-label', ['левая кнопка', 'средняя кнопка', 'правая кнопка'][i] || 'кнопка');
+      ['--bx', '--by', '--bw', '--bh'].forEach((v, j) =>
+        btn.style.setProperty(v, b[['x', 'y', 'w', 'h'][j]]));
+      btn.addEventListener('click', () => { try { App.handlers.shell_button(i); } catch (e) {} });
+      host.appendChild(btn);
+    });
+  }
+
   function build() {
+    return isScene(shell()) ? buildScene() : buildParts();
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Готовая сцена: одна фотография + игровой экран в перспективе            */
+  /* ---------------------------------------------------------------------- */
+  function buildScene() {
+    const s = shell();
+    const root = document.querySelector('.root');
+    if (!root) return false;
+
+    injectCss();
+
+    layer = document.createElement('div');
+    layer.className = 'skin-layer';
+
+    const scene = document.createElement('div');
+    scene.className = 'skin-scene';
+
+    const photo = document.createElement('img');
+    photo.className = 'skin-photo';
+    photo.src = s.image;
+    photo.alt = '';
+    photo.addEventListener('load', refit);
+    photo.addEventListener('error', () => failSafe('фотография не загрузилась'));
+    scene.appendChild(photo);
+
+    const warp = document.createElement('div');
+    warp.className = 'skin-warp';
+    scene.appendChild(warp);
+
+    addButtons(scene, s.buttons);
+    layer.appendChild(scene);
+    root.appendChild(layer);
+    moveCanvasInto(warp);
+
+    root.classList.add('skin-on');
+    refit();
+    window.addEventListener('resize', refit);
+    setTimeout(verifyOrFail, 1000);
+    return true;
+  }
+
+  /* Проекция квадрата 0..NATURAL на четырёхугольник экрана на фотографии.
+     Возвращает восемь чисел a..h: x' = (ax+by+c)/(gx+hy+1), y' = (dx+ey+f)/…
+     Решается система 8×8 обычным методом Гаусса — восемь строк, по две на
+     каждый угол. */
+  function homography(quad, size, k) {
+    const dst = quad.map(p => [p[0] * k, p[1] * k]);
+    const src = [[0, 0], [size, 0], [size, size], [0, size]];
+    const M = [], v = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i], [X, Y] = dst[i];
+      M.push([x, y, 1, 0, 0, 0, -x * X, -y * X]); v.push(X);
+      M.push([0, 0, 0, x, y, 1, -x * Y, -y * Y]); v.push(Y);
+    }
+    for (let c = 0; c < 8; c++) {
+      let p = c;
+      for (let r2 = c + 1; r2 < 8; r2++) if (Math.abs(M[r2][c]) > Math.abs(M[p][c])) p = r2;
+      if (Math.abs(M[p][c]) < 1e-12) return null;
+      [M[c], M[p]] = [M[p], M[c]]; [v[c], v[p]] = [v[p], v[c]];
+      const d = M[c][c];
+      for (let j = c; j < 8; j++) M[c][j] /= d;
+      v[c] /= d;
+      for (let r2 = 0; r2 < 8; r2++) {
+        if (r2 === c || !M[r2][c]) continue;
+        const f = M[r2][c];
+        for (let j = c; j < 8; j++) M[r2][j] -= f * M[c][j];
+        v[r2] -= f * v[c];
+      }
+    }
+    return v;      // [a,b,c,d,e,f,g,h]
+  }
+
+  /* Ставим сцену по месту и накладываем игровой экран на экран фотографии. */
+  function fitScene() {
+    if (!layer) return;
+    const s = shell();
+    const scene = layer.querySelector('.skin-scene');
+    const warp = layer.querySelector('.skin-warp');
+    if (!scene || !warp) return;
+
+    const lr = layer.getBoundingClientRect();
+    const vw = lr.width || 1, vh = lr.height || 1;
+
+    /* ширина экрана на фотографии, в её пикселях — по верхнему краю */
+    const q = s.quad;
+    const quadW = Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]);
+
+    /* сколько нужно увеличить фотографию, чтобы игровой экран вышел нужного
+       размера; и сколько нужно, чтобы фотография закрыла экран телефона без
+       щелей — берём большее */
+    const kWant  = NATURAL * zoom() / quadW;
+    const kCover = Math.max(vw / s.w, vh / s.h);
+    const k = Math.max(kWant, kCover);
+
+    const sw = s.w * k, sh = s.h * k;
+    const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
+    const cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+    /* держим экран фотографии в середине телефона, но без щелей по краям */
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const left = clamp(vw / 2 - cx * k, vw - sw, 0);
+    const top  = clamp(vh / 2 - cy * k, vh - sh, 0);
+
+    scene.style.width = sw.toFixed(2) + 'px';
+    scene.style.height = sh.toFixed(2) + 'px';
+    scene.style.left = left.toFixed(2) + 'px';
+    scene.style.top = top.toFixed(2) + 'px';
+
+    const H = homography(q, NATURAL, k);
+    if (!H) { failSafe('не получилось разместить экран'); return; }
+    const [a, b, c, d, e, f, g, h] = H;
+    warp.style.transform = 'matrix3d(' +
+      [a, d, 0, g, b, e, 0, h, 0, 0, 1, 0, c, f, 0, 1]
+        .map(n => (Math.abs(n) < 1e-9 ? 0 : +n.toFixed(8))).join(',') + ')';
+    warp.style.setProperty('--wrad', ((s.radius || 0) * NATURAL).toFixed(2) + 'px');
+
+    doneZoom = quadW * k / NATURAL;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Корпус из частей: картинка корпуса поверх картинки фона                 */
+  /* ---------------------------------------------------------------------- */
+  function buildParts() {
     const s = shell();
     const bg = background();
     const root = document.querySelector('.root');
@@ -255,26 +458,11 @@
     device.appendChild(screen);
     device.appendChild(glass);
 
-    (s.buttons || []).forEach((b, i) => {
-      const btn = document.createElement('button');
-      btn.className = 'skin-btn';
-      btn.setAttribute('aria-label', ['левая кнопка', 'средняя кнопка', 'правая кнопка'][i] || 'кнопка');
-      ['--bx', '--by', '--bw', '--bh'].forEach((v, j) =>
-        btn.style.setProperty(v, b[['x', 'y', 'w', 'h'][j]]));
-      btn.addEventListener('click', () => { try { App.handlers.shell_button(i); } catch (e) {} });
-      device.appendChild(btn);
-    });
+    addButtons(device, s.buttons);
 
     layer.appendChild(device);
     root.appendChild(layer);
-
-    /* переносим холст в вырез, запомнив, откуда взяли */
-    const gw = document.querySelector('.graphics-wrapper');
-    if (gw) {
-      home = gw.parentNode;
-      homeNext = gw.nextSibling;
-      fit.appendChild(gw);
-    }
+    moveCanvasInto(fit);
 
     root.classList.add('skin-on');
     refit();
@@ -319,6 +507,7 @@
   /* Подгоняем масштаб экрана и шаг пиксельной сетки. */
   function refit() {
     if (!layer) return;
+    if (isScene(shell())) { fitScene(); return; }
     fitDevice();
     const screen = layer.querySelector('.skin-screen');
     const fit = layer.querySelector('.skin-fit');
@@ -371,7 +560,7 @@
   /* Экран должен быть виден и не схлопнут. Если нет — уходим в обычный вид. */
   function verifyOrFail() {
     if (!layer) return;
-    const scr = layer.querySelector('.skin-screen');
+    const scr = layer.querySelector('.skin-screen, .skin-warp');
     const r = scr && scr.getBoundingClientRect();
     if (!r || r.width < 24 || r.height < 24) { failSafe('не получилось разместить экран'); return; }
     drop(LS_TRY);
@@ -411,8 +600,15 @@
 
   function openScreen() {
     if (!hasApp()) return;
-    const shellIds = Object.keys(SHELLS), bgIds = Object.keys(BACKGROUNDS);
+    const shellIds = Object.keys(ALL), bgIds = Object.keys(BACKGROUNDS);
     const on = isOn();
+    /* У готовой сцены фон, положение и тень уже внутри фотографии — этих
+       пунктов для неё нет, состав списка другой. */
+    const scene = isScene(shell());
+    const reopen = (list) => setTimeout(() => {
+      try { if (list && list.close) list.close(); } catch (e) {}
+      openScreen();
+    }, 220);
 
     const items = [
       {
@@ -424,10 +620,7 @@
           apply();
           /* состав пунктов поменялся — пересобираем экран, но не сразу:
              дадим игре закончить со старым списком */
-          setTimeout(() => {
-            try { if (list && list.close) list.close(); } catch (e) {}
-            openScreen();
-          }, 220);
+          reopen(list);
           return true;
         }
       },
@@ -436,7 +629,7 @@
         _ignore: !on,
         icon: 'egg',
         name: 'корпус: ' + shell().name,
-        onclick: (btn) => {
+        onclick: (btn, list) => {
           if (shellIds.length < 2) {
             try { App.displayPopup('Другие корпуса появятся, когда добавим картинки.', 3000); } catch (e) {}
             return true;
@@ -444,12 +637,14 @@
           set(LS_SHELL, shellIds[(shellIds.indexOf(shellId()) + 1) % shellIds.length]);
           drop(LS_ZOOM); drop(LS_Y);        // у нового корпуса свои значения по умолчанию
           apply();
-          relabel(btn, 'egg', 'корпус: ' + shell().name);
+          /* у сцены и у корпуса из частей разный состав пунктов */
+          if (isScene(shell()) !== scene) reopen(list);
+          else relabel(btn, 'egg', 'корпус: ' + shell().name);
           return true;
         }
       },
       {
-        _ignore: !on,
+        _ignore: !on || scene,
         icon: 'panorama',
         name: 'фон: ' + background().name,
         onclick: (btn) => {
@@ -464,15 +659,16 @@
         icon: 'up-right-and-down-left-from-center',
         name: 'экран: ' + zoomLabel(),
         onclick: (btn) => {
-          const i = ZOOMS.findIndex(v => Math.abs(v - zoom()) < 0.005);
-          set(LS_ZOOM, String(ZOOMS[((i < 0 ? 0 : i) + 1) % ZOOMS.length]));
+          const list2 = zooms();
+          const i = list2.findIndex(v => Math.abs(v - zoom()) < 0.005);
+          set(LS_ZOOM, String(list2[((i < 0 ? 0 : i) + 1) % list2.length]));
           apply();
           relabel(btn, 'up-right-and-down-left-from-center', 'экран: ' + zoomLabel());
           return true;
         }
       },
       {
-        _ignore: !on,
+        _ignore: !on || scene,
         icon: 'arrows-up-down',
         name: 'положение: ' + spotName(),
         onclick: (btn) => {
@@ -485,9 +681,14 @@
       },
       { _ignore: !on, type: 'separator' },
       {
-        _ignore: !on,
+        _ignore: !on || scene,
         type: 'info',
         name: '<small>Экран 100 % — ровно такой же, как без фотокорпуса: корпус подгоняется под экран.<br><br>Если картинка не загрузится, фотокорпус выключится сам и напишет причину.</small>'
+      },
+      {
+        _ignore: !on || !scene,
+        type: 'info',
+        name: '<small>Это одна настоящая фотография: корпус, стол, свет и тень уже на ней, игра наложена в экран с учётом наклона.<br><br>100 % — экран ровно как без фотокорпуса. Меньше — видно больше стола, но и текст мельче.<br><br>Вернуться к прежнему корпусу — пунктом «корпус» выше.</small>'
       },
       {
         _ignore: on,
@@ -532,12 +733,12 @@
     on:    () => { set(LS_ON, '1'); drop(LS_TRY); apply(); },
     off:   () => failSafe('вручную'),
     menu:  openScreen,
-    shell: id => { if (SHELLS[id]) { set(LS_SHELL, id); apply(); } return shellId(); },
+    shell: id => { if (ALL[id]) { set(LS_SHELL, id); apply(); } return shellId(); },
     bg:    id => { if (BACKGROUNDS[id]) { set(LS_BG, id); apply(); } return bgId(); },
     zoom:  v  => { if (v) set(LS_ZOOM, String(v)); apply(); return doneZoom; },
     size:  v  => { if (v) set(LS_ZOOM, String(v)); apply(); return doneZoom; },   // старое имя
     y:     v  => { if (v) set(LS_Y, String(v)); apply(); return shellY(); },
-    rect:  () => { const el = layer && layer.querySelector('.skin-screen'); return el ? el.getBoundingClientRect() : null; },
-    shells: SHELLS, backgrounds: BACKGROUNDS,
+    rect:  () => { const el = layer && layer.querySelector('.skin-screen, .skin-warp'); return el ? el.getBoundingClientRect() : null; },
+    shells: ALL, scenes: SCENES, backgrounds: BACKGROUNDS,
   };
 })();

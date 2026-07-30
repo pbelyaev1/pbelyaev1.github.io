@@ -40,6 +40,7 @@ const ASSETS = [
   "resources/img/skins/shell_cream.png",
   "resources/img/skins/shadow_cream.png",
   "resources/img/skins/bg_wood.jpg",
+  "resources/img/skins/scene_desk.jpg",
   "resources/font/PixelifySans-RU.ttf",
   // libs
   "src/libs/moment.js",
