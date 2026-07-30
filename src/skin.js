@@ -77,8 +77,78 @@
      начиная с левого верхнего. buttons — доли от размера фотографии.       */
   /* ---------------------------------------------------------------------- */
   const SCENES = {
+    forest: {
+      name: 'лес',
+      kind: 'scene',
+      image: 'resources/img/skins/scene_forest.jpg',
+      w: 850, h: 1850,
+      quad: [[249, 867], [596, 866], [597, 1207], [249, 1207]],
+      radius: 0.030,
+      buttons: [
+        { x: 0.28235, y: 0.68730, w: 0.12000, h: 0.05514 },
+        { x: 0.43647, y: 0.70459, w: 0.12000, h: 0.05514 },
+        { x: 0.59588, y: 0.68838, w: 0.12000, h: 0.05514 },
+      ],
+      zooms: [1.00, 0.85, 1.15],
+    },
+    orbit: {
+      name: 'орбита',
+      kind: 'scene',
+      image: 'resources/img/skins/scene_orbit.jpg',
+      w: 850, h: 1851,
+      quad: [[236, 842], [597, 841], [600, 1202], [235, 1202]],
+      radius: 0.030,
+      buttons: [
+        { x: 0.27918, y: 0.68010, w: 0.10400, h: 0.05364 },
+        { x: 0.43287, y: 0.69660, w: 0.10720, h: 0.05143 },
+        { x: 0.58678, y: 0.68093, w: 0.10880, h: 0.05143 },
+      ],
+      zooms: [1.00, 0.89, 1.15],
+    },
+    nineties: {
+      name: 'девяностые',
+      kind: 'scene',
+      image: 'resources/img/skins/scene_90s.jpg',
+      w: 850, h: 1850,
+      quad: [[248, 799], [596, 799], [596, 1160], [248, 1160]],
+      radius: 0.030,
+      buttons: [
+        { x: 0.29299, y: 0.64081, w: 0.11520, h: 0.05514 },
+        { x: 0.43631, y: 0.65432, w: 0.11680, h: 0.05514 },
+        { x: 0.57866, y: 0.64135, w: 0.11680, h: 0.05514 },
+      ],
+      zooms: [1.00, 0.86, 1.15],
+    },
+    room: {
+      name: 'детская',
+      kind: 'scene',
+      image: 'resources/img/skins/scene_room.jpg',
+      w: 851, h: 1849,
+      quad: [[256, 825], [593, 825], [594, 1166], [254, 1166]],
+      radius: 0.030,
+      buttons: [
+        { x: 0.31687, y: 0.66250, w: 0.10068, h: 0.05737 },
+        { x: 0.44209, y: 0.68118, w: 0.11347, h: 0.05516 },
+        { x: 0.57819, y: 0.66343, w: 0.11506, h: 0.05443 },
+      ],
+      zooms: [1.00, 0.83, 1.15],
+    },
+    neon: {
+      name: 'неон',
+      kind: 'scene',
+      image: 'resources/img/skins/scene_neon.jpg',
+      w: 851, h: 1849,
+      quad: [[248, 862], [598, 855], [597, 1207], [247, 1207]],
+      radius: 0.030,
+      buttons: [
+        { x: 0.30392, y: 0.68339, w: 0.08310, h: 0.05075 },
+        { x: 0.45647, y: 0.69990, w: 0.08470, h: 0.04855 },
+        { x: 0.60611, y: 0.68594, w: 0.06392, h: 0.04781 },
+      ],
+      zooms: [1.00, 0.86, 1.15],
+    },
     space: {
-      name: 'фото в космосе',
+      name: 'космос',
       kind: 'scene',
       image: 'resources/img/skins/scene_space.jpg',
       w: 853, h: 1844,
@@ -94,7 +164,7 @@
       zooms: [1.00, 0.88, 1.15],
     },
     leaves: {
-      name: 'фото в листве',
+      name: 'листва',
       kind: 'scene',
       image: 'resources/img/skins/scene_leaves.jpg',
       w: 904, h: 1739,
@@ -110,7 +180,7 @@
       zooms: [1.00, 1.15, 1.30],
     },
     desk: {
-      name: 'фото на столе',
+      name: 'стол',
       kind: 'scene',
       image: 'resources/img/skins/scene_desk.jpg',
       w: 852, h: 1846,
@@ -634,6 +704,39 @@
     btn.innerHTML = (hasApp() && App.getIcon ? App.getIcon(icon, true) : '') + ' ' + text;
   }
 
+  /* Список всех видов отдельным экраном: перебирать по кругу девять штук
+     нажатием на одну строку — мучение, поэтому здесь каждый своей строкой,
+     текущий помечен точкой. Выбрал — вернулись назад. */
+  function openPicker() {
+    if (!hasApp()) return;
+    const now = shellId();
+    const row = (id) => ({
+      icon: isScene(ALL[id]) ? 'image' : 'egg',
+      name: (id === now ? '● ' : '') + ALL[id].name,
+      onclick: (btn, list) => {
+        if (id !== shellId()) {
+          set(LS_SHELL, id);
+          drop(LS_ZOOM); drop(LS_Y);        // у нового вида свои значения по умолчанию
+          apply();
+        }
+        setTimeout(() => {
+          try { if (list && list.close) list.close(); } catch (e) {}
+          openScreen();
+        }, 200);
+        return true;
+      }
+    });
+    const scenes = Object.keys(ALL).filter(id => isScene(ALL[id]));
+    const parts  = Object.keys(ALL).filter(id => !isScene(ALL[id]));
+    const items = scenes.map(row);
+    if (parts.length) {
+      items.push({ type: 'separator' });
+      items.push({ type: 'info', name: '<small>собирается из частей:</small>' });
+      parts.forEach(id => items.push(row(id)));
+    }
+    App.displayList(items, null, 'какой вид');
+  }
+
   function openScreen() {
     if (!hasApp()) return;
     const shellIds = Object.keys(ALL), bgIds = Object.keys(BACKGROUNDS);
@@ -664,18 +767,16 @@
       {
         _ignore: !on,
         icon: 'egg',
-        name: 'корпус: ' + shell().name,
+        name: 'вид: ' + shell().name,
         onclick: (btn, list) => {
           if (shellIds.length < 2) {
-            try { App.displayPopup('Другие корпуса появятся, когда добавим картинки.', 3000); } catch (e) {}
+            try { App.displayPopup('Другие виды появятся, когда добавим картинки.', 3000); } catch (e) {}
             return true;
           }
-          set(LS_SHELL, shellIds[(shellIds.indexOf(shellId()) + 1) % shellIds.length]);
-          drop(LS_ZOOM); drop(LS_Y);        // у нового корпуса свои значения по умолчанию
-          apply();
-          /* у сцены и у корпуса из частей разный состав пунктов */
-          if (isScene(shell()) !== scene) reopen(list);
-          else relabel(btn, 'egg', 'корпус: ' + shell().name);
+          setTimeout(() => {
+            try { if (list && list.close) list.close(); } catch (e) {}
+            openPicker();
+          }, 200);
           return true;
         }
       },
@@ -724,7 +825,7 @@
       {
         _ignore: !on || !scene,
         type: 'info',
-        name: '<small>Это одна настоящая фотография: корпус, стол, свет и тень уже на ней, игра наложена в экран с учётом наклона.<br><br>100 % — экран ровно как без фотокорпуса. Больше — текст крупнее, но видно меньше кадра; меньше — наоборот.<br><br>Пункт «корпус» перебирает сцены и обычный корпус по кругу — им же и откатиться.</small>'
+        name: '<small>Это одна настоящая фотография: корпус, стол, свет и тень уже на ней, игра наложена в экран с учётом наклона.<br><br>100 % — экран ровно как без фотокорпуса. Больше — текст крупнее, но видно меньше кадра; меньше — наоборот.<br><br>Пункт «вид» — список всех сцен и обычного корпуса, им же и откатиться.</small>'
       },
       {
         _ignore: on,
