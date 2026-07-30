@@ -28,7 +28,7 @@
   const LS_ON    = 'tama_skin_on';
   const LS_SHELL = 'tama_skin_shell';
   const LS_BG    = 'tama_skin_bg';
-  const LS_SIZE  = 'tama_skin_size';       // доля ширины экрана, которую занимает корпус
+  const LS_ZOOM  = 'tama_skin_zoom';       // масштаб игрового экрана: 1 = как без корпуса
   const LS_Y     = 'tama_skin_y';          // положение корпуса по вертикали, доля высоты
   const LS_TRY   = 'tama_skin_building';   // сборка началась, но ещё не подтвердилась
 
@@ -47,9 +47,12 @@
       name: 'кремовый',
       image: 'resources/img/skins/shell_cream.png',
       w: 892, h: 1110,
-      size: 0.82, offsetY: 0.5,
+      offsetY: 0.5,
       screen:  { x: 0.25561, y: 0.31081, w: 0.48318, h: 0.38829 },
-      radius:  0.045,                      // скругление углов экрана, доля от его ширины
+      radius:  0.028,                      // скругление углов экрана, доля от его ширины
+      /* тень нарисована заранее, tools/makeshadow.py; pad — поле вокруг корпуса
+         на картинке тени, доля от ширины корпуса */
+      shadow:  { image: 'resources/img/skins/shadow_cream.png', pad: 0.19955 },
       buttons: [
         { x: 0.26677, y: 0.79555, w: 0.13238, h: 0.09989 },   // левая
         { x: 0.43294, y: 0.83178, w: 0.13076, h: 0.09859 },   // средняя
@@ -64,7 +67,9 @@
     none: { name: 'нет',    image: null },
   };
 
-  const SIZES = [0.62, 0.72, 0.82, 0.92, 1.05];
+  /* Масштаб игрового экрана. 1 = ровно 192 точки, как в режиме без фотокорпуса:
+     корпус подгоняется под экран, а не наоборот. */
+  const ZOOMS = [1.00, 0.92, 0.85, 1.08];
   const SPOTS = [
     { v: 0.40, name: 'выше' },
     { v: 0.50, name: 'центр' },
@@ -86,8 +91,11 @@
     const v = parseFloat(get(key));
     return (v >= lo && v <= hi) ? v : def;
   };
-  const shellSize = () => num(LS_SIZE, shell().size || 0.82, 0.3, 1.6);
+  const zoom      = () => num(LS_ZOOM, 1, 0.5, 2);
   const shellY    = () => num(LS_Y, shell().offsetY || 0.5, 0.2, 0.8);
+  /* Сколько получилось на самом деле: на узком экране корпус может не влезть
+     в запрошенный масштаб, и врать об этом в меню не надо. */
+  let doneZoom = 1;
   const spotName  = () => {
     const y = shellY();
     const found = SPOTS.find(s => Math.abs(s.v - y) < 0.02);
@@ -103,19 +111,26 @@
 
 .skin-bg{position:absolute;inset:0;background:50% 50% / cover no-repeat;}
 
-/* корпус: то, относительно чего считаются экран и кнопки */
+/* корпус: то, относительно чего считаются экран и кнопки.
+   Ширину ставит скрипт (в точках), исходя из нужного размера игрового экрана. */
 .skin-device{position:absolute;left:50%;top:calc(var(--dev-y) * 100%);
-  width:calc(var(--dev-size) * 100%);
   /* высоту задаём соотношением сторон из описания, а НЕ размером картинки:
      иначе не загрузившаяся картинка обнуляет высоту, вырез схлопывается,
      и вместо игры остаётся чёрный экран без выхода */
   aspect-ratio:var(--dev-ar);
   transform:translate(-50%,-50%);}
 .skin-shell{position:absolute;inset:0;display:block;width:100%;height:100%;
-  user-select:none;-webkit-user-drag:none;
-  /* тень идёт по силуэту корпуса, а не по прямоугольнику: сначала короткая
-     и плотная у самой поверхности, потом длинная и мягкая */
-  filter:drop-shadow(var(--sh1)) drop-shadow(var(--sh2));}
+  user-select:none;-webkit-user-drag:none;}
+
+/* Тень — отдельная картинка, нарисованная по силуэту корпуса заранее.
+   Раньше её рисовал сам браузер (filter: drop-shadow), но на телефоне он
+   иногда берёт вместо силуэта прямоугольник картинки, и тень получается
+   квадратной. Готовая картинка так сломаться не может. */
+.skin-shadow{position:absolute;display:block;pointer-events:none;
+  /* поле вокруг корпуса на картинке тени одинаковое со всех сторон, но по
+     вертикали его доля другая — считаем от высоты корпуса */
+  left:calc(var(--shpx) * -100%);top:calc(var(--shpy) * -100%);
+  width:calc((1 + 2 * var(--shpx)) * 100%);height:auto;}
 
 /* вырез под экран */
 .skin-screen{position:absolute;overflow:hidden;pointer-events:auto;background:#000;
@@ -193,13 +208,23 @@
 
     const device = document.createElement('div');
     device.className = 'skin-device';
-    device.style.setProperty('--dev-size', shellSize());
     device.style.setProperty('--dev-y', shellY());
     device.style.setProperty('--dev-ar', (s.w / s.h).toFixed(5));
 
     const left = (s.light || 'left-top') === 'left-top';
-    device.style.setProperty('--sh1', (left ? '6px' : '-6px') + ' 8px 10px rgba(0,0,0,.45)');
-    device.style.setProperty('--sh2', (left ? '18px' : '-18px') + ' 34px 42px rgba(0,0,0,.32)');
+
+    if (s.shadow && s.shadow.image) {
+      const sh = document.createElement('img');
+      sh.className = 'skin-shadow';
+      sh.src = s.shadow.image;
+      sh.alt = '';
+      const pad = s.shadow.pad || 0;
+      sh.style.setProperty('--shpx', pad.toFixed(5));
+      sh.style.setProperty('--shpy', (pad * s.w / s.h).toFixed(5));
+      /* если картинки тени нет — просто не будет тени, игру это не касается */
+      sh.addEventListener('error', () => sh.remove());
+      device.appendChild(sh);
+    }
 
     const img = document.createElement('img');
     img.className = 'skin-shell';
@@ -211,10 +236,10 @@
 
     const screen = document.createElement('div');
     screen.className = 'skin-screen';
-    const srad = (s.radius * 100 * s.screen.w).toFixed(2) + 'vw';
     ['x', 'y', 'w', 'h'].forEach((k, i) =>
       screen.style.setProperty(['--sx', '--sy', '--sw', '--sh'][i], s.screen[k]));
-    screen.style.setProperty('--srad', srad);
+    /* скругление ставит refit(): оно считается от получившейся ширины выреза */
+    screen.style.setProperty('--srad', '0px');
 
     const fit = document.createElement('div');
     fit.className = 'skin-fit';
@@ -270,9 +295,42 @@
     return true;
   }
 
+  /* Размер корпуса считается ОТ игрового экрана, а не наоборот: сначала
+     решаем, сколько точек должен занимать экран, потом растим под него корпус.
+     При масштабе 100 % экран получается ровно 192 точки — столько же, сколько
+     в режиме без фотокорпуса, и вся вёрстка меню совпадает точка в точку. */
+  function fitDevice() {
+    if (!layer) return;
+    const s = shell();
+    const device = layer.querySelector('.skin-device');
+    if (!device) return;
+    const ar = s.w / s.h;                          // ширина к высоте
+    /* вырез квадратный в пикселях картинки; на всякий случай берём меньшую
+       сторону — растягивать квадратный игровой экран нельзя */
+    const holeShare = Math.min(s.screen.w, s.screen.h / ar);
+    const want = NATURAL * zoom();                 // сколько точек должен занять экран
+    let devW = want / holeShare;
+
+    /* Если корпус в таком размере не влезает в экран телефона — уменьшаем. Но
+       сначала разрешаем ему немного выйти за края по бокам: обещание «экран
+       такой же, как без фотокорпуса» важнее, чем целиком видное яйцо, а
+       фотография, срезанная по краям, выглядит просто как крупный план. */
+    const BLEED = 1.08;
+    const lr = layer.getBoundingClientRect();
+    const room = Math.min(
+      lr.width  ? lr.width * BLEED / devW : 1,
+      lr.height ? (lr.height - 8) / (devW / ar) : 1
+    );
+    if (room < 1) devW *= room;
+
+    device.style.width = devW.toFixed(2) + 'px';
+    doneZoom = devW * holeShare / NATURAL;
+  }
+
   /* Подгоняем масштаб экрана и шаг пиксельной сетки. */
   function refit() {
     if (!layer) return;
+    fitDevice();
     const screen = layer.querySelector('.skin-screen');
     const fit = layer.querySelector('.skin-fit');
     const glass = layer.querySelector('.skin-glass');
@@ -282,6 +340,11 @@
     /* берём меньшую сторону: игровой экран квадратный, растягивать нельзя */
     const k = Math.min(r.width, r.height) / NATURAL;
     fit.style.setProperty('--fit', k.toFixed(4));
+
+    /* скругление выреза — доля от его ширины, в точках */
+    const srad = (shell().radius || 0) * r.width;
+    screen.style.setProperty('--srad', srad.toFixed(2) + 'px');
+    if (glass) glass.style.setProperty('--srad', srad.toFixed(2) + 'px');
 
     if (glass) {
       const canvas = fit.querySelector('canvas');
@@ -345,6 +408,14 @@
      при включении и выключении. Остальные пункты правят свою подпись на
      месте: если закрывать и открывать список на каждое нажатие, игра успевает
      закрыть и наш новый экран тоже. */
+  /* Показываем то, что получилось. Если корпус пришлось уменьшить, потому что
+     он не влезал в экран телефона, — так и пишем, а не рисуем желаемое. */
+  function zoomLabel() {
+    const want = Math.round(zoom() * 100);
+    const got = layer ? Math.round(doneZoom * 100) : want;
+    return Math.abs(got - want) > 2 ? got + '% (предел)' : want + '%';
+  }
+
   function relabel(btn, icon, text) {
     btn.innerHTML = (hasApp() && App.getIcon ? App.getIcon(icon, true) : '') + ' ' + text;
   }
@@ -382,7 +453,7 @@
             return true;
           }
           set(LS_SHELL, shellIds[(shellIds.indexOf(shellId()) + 1) % shellIds.length]);
-          drop(LS_SIZE); drop(LS_Y);        // у нового корпуса свои значения по умолчанию
+          drop(LS_ZOOM); drop(LS_Y);        // у нового корпуса свои значения по умолчанию
           apply();
           relabel(btn, 'egg', 'корпус: ' + shell().name);
           return true;
@@ -402,13 +473,12 @@
       {
         _ignore: !on,
         icon: 'up-right-and-down-left-from-center',
-        name: 'размер: ' + Math.round(shellSize() * 100) + '%',
+        name: 'экран: ' + zoomLabel(),
         onclick: (btn) => {
-          const i = SIZES.findIndex(v => Math.abs(v - shellSize()) < 0.005);
-          set(LS_SIZE, String(SIZES[((i < 0 ? 0 : i) + 1) % SIZES.length]));
+          const i = ZOOMS.findIndex(v => Math.abs(v - zoom()) < 0.005);
+          set(LS_ZOOM, String(ZOOMS[((i < 0 ? 0 : i) + 1) % ZOOMS.length]));
           apply();
-          relabel(btn, 'up-right-and-down-left-from-center',
-                  'размер: ' + Math.round(shellSize() * 100) + '%');
+          relabel(btn, 'up-right-and-down-left-from-center', 'экран: ' + zoomLabel());
           return true;
         }
       },
@@ -428,7 +498,7 @@
       {
         _ignore: !on,
         type: 'info',
-        name: '<small>Корпус пока один — другие появятся, когда добавим картинки.<br><br>Если что-то пойдёт не так, три касания по фону (не по экрану и не по кнопкам) вернут обычный корпус.</small>'
+        name: '<small>Экран 100 % — ровно такой же, как без фотокорпуса: корпус подгоняется под экран.<br><br>Если что-то пойдёт не так, три касания по фону (не по экрану и не по кнопкам) вернут обычный корпус.</small>'
       },
       {
         _ignore: on,
@@ -475,7 +545,8 @@
     menu:  openScreen,
     shell: id => { if (SHELLS[id]) { set(LS_SHELL, id); apply(); } return shellId(); },
     bg:    id => { if (BACKGROUNDS[id]) { set(LS_BG, id); apply(); } return bgId(); },
-    size:  v  => { if (v) set(LS_SIZE, String(v)); apply(); return shellSize(); },
+    zoom:  v  => { if (v) set(LS_ZOOM, String(v)); apply(); return doneZoom; },
+    size:  v  => { if (v) set(LS_ZOOM, String(v)); apply(); return doneZoom; },   // старое имя
     y:     v  => { if (v) set(LS_Y, String(v)); apply(); return shellY(); },
     rect:  () => { const el = layer && layer.querySelector('.skin-screen'); return el ? el.getBoundingClientRect() : null; },
     shells: SHELLS, backgrounds: BACKGROUNDS,
