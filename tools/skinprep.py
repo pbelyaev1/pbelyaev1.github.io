@@ -114,6 +114,86 @@ def find_screen(img):
     return mask, (x0, y0, x1 + 1, y1 + 1)
 
 
+def cut_screen(img):
+    """Вырезает пурпурный экран — так же мягко, как зелёный фон вокруг корпуса.
+
+    По краю выреза пурпур смешан с пластиком. Если рубить порогом, вокруг
+    игрового экрана остаётся розовая кайма в пару точек шириной — на телефоне
+    она хорошо заметна. Поэтому край делаем плавным, а пурпур из оставшихся
+    полупрозрачных пикселей вычитаем: зелёный канал поднимаем до уровня
+    соседних, и вместо розового получается нейтральная тень бортика.
+    """
+    a = np.asarray(img).astype(np.float32)
+    r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    mag = np.minimum(r, b) - g               # насколько пиксель «пурпурнее» всего прочего
+
+    LO, HI = 10.0, 90.0
+    t = np.clip((mag - LO) / (HI - LO), 0, 1)     # 1 — чистый экран, 0 — чистый пластик
+    alpha = a[:, :, 3] * (1.0 - t)
+
+    keep = alpha > 0
+    fix = keep & (mag > 0)                       # despill: гасим пурпур в остатке
+    g2 = np.where(fix, np.minimum(r, b), g)
+
+    out = np.zeros(a.shape, dtype=np.uint8)
+    out[:, :, 0] = np.where(keep, r, 0).astype(np.uint8)
+    out[:, :, 1] = np.where(keep, g2, 0).astype(np.uint8)
+    out[:, :, 2] = np.where(keep, b, 0).astype(np.uint8)
+    out[:, :, 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    return Image.fromarray(out, 'RGBA')
+
+
+def hole_box(img):
+    """Прямоугольник выреза экрана: прозрачное пятно, не касающееся краёв кадра."""
+    from scipy import ndimage
+    a = np.asarray(img)[:, :, 3]
+    H, W = a.shape
+    lbl, n = ndimage.label(a < 128)
+    best = None
+    for i in range(1, n + 1):
+        ys, xs = np.where(lbl == i)
+        if xs.min() == 0 or ys.min() == 0 or xs.max() == W - 1 or ys.max() == H - 1:
+            continue                                # это фон вокруг корпуса
+        if best is None or len(ys) > best[0]:
+            best = (len(ys), xs.min(), ys.min(), xs.max() + 1, ys.max() + 1)
+    if best is None:
+        raise SystemExit('Вырез экрана не нашёлся.')
+    return best[1:]
+
+
+def square_hole(img):
+    """Делает вырез экрана строго квадратным.
+
+    Игровой экран квадратный. Если вырез чуть выше, чем шире (у нарисованных
+    корпусов так почти всегда), лишние точки остаются чёрной полосой внутри
+    экрана — выглядит как брак. Поэтому лишнее по длинной стороне закрываем,
+    протягивая внутрь пиксели бортика, что стоят сразу за вырезом: бортик
+    становится на пару точек толще, и этого никто не замечает.
+    """
+    x0, y0, x1, y1 = hole_box(img)
+    w, h = x1 - x0, y1 - y0
+    if w == h:
+        return img, (x0, y0, x1, y1), 0
+    a = np.asarray(img).copy()
+    d = abs(h - w)
+    lo, hi = d // 2, d - d // 2
+    if h > w:
+        src_top, src_bot = a[max(0, y0 - 2), x0:x1], a[min(a.shape[0] - 1, y1 + 1), x0:x1]
+        for k in range(lo):
+            a[y0 + k, x0:x1] = src_top
+        for k in range(hi):
+            a[y1 - 1 - k, x0:x1] = src_bot
+        box = (x0, y0 + lo, x1, y1 - hi)
+    else:
+        src_l, src_r = a[y0:y1, max(0, x0 - 2)], a[y0:y1, min(a.shape[1] - 1, x1 + 1)]
+        for k in range(lo):
+            a[y0:y1, x0 + k] = src_l
+        for k in range(hi):
+            a[y0:y1, x1 - 1 - k] = src_r
+        box = (x0 + lo, y0, x1 - hi, y1)
+    return Image.fromarray(a, 'RGBA'), box, d
+
+
 def main():
     if len(sys.argv) < 3:
         raise SystemExit('Как запускать: python3 tools/skinprep.py вход.png выход.png [--ar 0.46]')
@@ -138,15 +218,20 @@ def main():
     W, H = img.size
     mask, (x0, y0, x1, y1) = find_screen(img)
 
-    # пурпур — в прозрачность; края слегка размываем, чтобы не было зубцов
-    a = np.asarray(img).copy()
-    a[:, :, 3] = np.where(mask, 0, a[:, :, 3])
-    # цвет под прозрачным делаем нейтральным, иначе по краю лезет пурпурная кайма
-    a[:, :, 0] = np.where(mask, 0, a[:, :, 0])
-    a[:, :, 1] = np.where(mask, 0, a[:, :, 1])
-    a[:, :, 2] = np.where(mask, 0, a[:, :, 2])
-    out = Image.fromarray(a, 'RGBA')
+    out = cut_screen(img)
+    out, (x0, y0, x1, y1), d = square_hole(out)
+    if d:
+        print('вырез выровняли до квадрата: убрали %d точек по длинной стороне' % d)
     out.save(dst)
+
+    # проверяем себя: розовой каймы вокруг выреза остаться не должно
+    chk = np.asarray(out).astype(np.int16)
+    ring = np.zeros(chk.shape[:2], dtype=bool)
+    ring[max(0, y0 - 3): y1 + 3, max(0, x0 - 3): x1 + 3] = True
+    ring &= chk[:, :, 3] > 16
+    if ring.any():
+        m = (np.minimum(chk[:, :, 0], chk[:, :, 2]) - chk[:, :, 1])[ring]
+        print('розовая кайма вокруг выреза: максимум %d из 255 (норма — до 12)' % max(0, int(m.max())))
 
     skin = {
         'image': dst.split('resources/')[-1] if 'resources/' in dst else dst,
