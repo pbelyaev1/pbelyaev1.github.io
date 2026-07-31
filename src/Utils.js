@@ -406,6 +406,14 @@ const wordBank = {
   ]
 };
 const generateRandomSentence = (isQuestion = Math.random() > 0.5) => {
+    /* НАША ПРАВКА: фраза собирается здесь и уходит в пузырь уже целиком,
+       поэтому словарь русификации до неё не дотягивается — сочетаний десятки
+       тысяч. Сам генератор подменить снаружи нельзя: он объявлен через const и
+       в window не попадает. Поэтому спрашиваем русский генератор сами.
+       Если русификация не загрузилась, всё работает как раньше. */
+    if (typeof window !== 'undefined' && typeof window.ruRandomSentence === 'function') {
+        return window.ruRandomSentence(isQuestion);
+    }
     const {slot1, slot2, slot3, questionStarters} = wordBank;
     if(isQuestion) return `${randomFromArray(questionStarters)} ${randomFromArray(slot3)}`;
     return `${randomFromArray(slot1)} ${randomFromArray(slot2)} ${randomFromArray(slot3)}`

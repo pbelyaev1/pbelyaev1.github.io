@@ -181,7 +181,8 @@
     try { return App.settings.simOnServer !== false; } catch (e) { return false; }
   };
 
-  /* Та же величина, что читает Pet.js. По умолчанию 1 — без замедления. */
+  /* Дополнительное замедление, пока игра закрыта. По умолчанию 1 — закрытая
+     игра идёт с той же скоростью, что открытая. */
   function offlineSpeed() {
     try {
       const v = App.settings.offlineSpeed;
@@ -190,6 +191,22 @@
     return 1;
   }
 
+  /* Общая скорость жизни: действует ВЕЗДЕ — и в открытой игре, и в закрытой,
+     и на сервере. Ту же величину читает Pet.statsManager. */
+  const LIFE_DEFAULT = 0.3;
+  function lifeSpeed() {
+    try {
+      const v = App.settings.lifeSpeed;
+      if (typeof v === 'number' && v > 0) return v;
+    } catch (e) {}
+    return LIFE_DEFAULT;
+  }
+
+  /* С какой скоростью тратит показатели сервер. Он считает за закрытую игру,
+     поэтому обе настройки перемножаются. Отправляем это в старом поле speed —
+     тогда уже установленный воркер поймёт настройку без переустановки. */
+  const serverSpeed = () => lifeSpeed() * offlineSpeed();
+
   /* Всё, что нужно серверу, чтобы продолжить жизнь питомца с этой точки. */
   function simSnapshot() {
     try {
@@ -197,7 +214,9 @@
         stats: JSON.parse(JSON.stringify(App.pet.stats)),
         traits: (App.petDefinition.traits || []).slice(),
         stage: App.petDefinition.lifeStage,
-        speed: offlineSpeed(),
+        speed: serverSpeed(),          // скорость жизни × замедление в закрытой игре
+        lifeSpeed: lifeSpeed(),        // по отдельности — на будущее
+        offlineSpeed: offlineSpeed(),
         sleepStart: App.constants.SLEEP_START + (App.settings.sleepingHoursOffset || 0),
         sleepEnd: App.constants.SLEEP_END + (App.settings.sleepingHoursOffset || 0),
         plants: [], animals: [], rabbitHole: null, ageUpAt: null,
@@ -296,7 +315,7 @@
     for (let i = 0; i <= steps; i++) {
       const at = now + i * STEP_SEC * 1000;
       const night = srv ? false : isSleepHourAt(new Date(at));
-      const mult = offlineSpeed();               // скорость жизни, пока игра закрыта
+      const mult = serverSpeed();                // та же скорость, что у сервера
       const dt = STEP_SEC;
 
       /* Спящего питомца нельзя ни покормить, ни поиграть с ним — в режиме
@@ -1106,6 +1125,16 @@
   function ensureSpeedSetting() {
     if (!hasApp() || !App.settings) return;
     if (typeof App.settings.offlineSpeed !== 'number') App.settings.offlineSpeed = 1;
+    /* Разовый переезд на новую настройку. Раньше замедлять жизнь можно было
+       только через «закрыто», и кто хотел спокойной игры — крутил её. Теперь
+       для этого есть «скорость жизни», а «закрыто» осталось дополнительным
+       множителем: если оставить обе, они перемножатся и питомец почти замрёт.
+       Поэтому в момент появления новой настройки возвращаем «закрыто» на
+       100 % — ровно один раз, дальше человек волен ставить что хочет. */
+    if (typeof App.settings.lifeSpeed !== 'number') {
+      App.settings.lifeSpeed = LIFE_DEFAULT;
+      if (App.settings.offlineSpeed < 1) App.settings.offlineSpeed = 1;
+    }
     if (typeof App.settings.simOnServer !== 'boolean') App.settings.simOnServer = true;
   }
 
@@ -1129,7 +1158,19 @@
     const { data } = await api('/api/state');
     if (!data || !data.has_state || !data.stats) throw new Error('сервер ещё не считал');
     const s = App.pet.stats;
-    Object.keys(data.stats).forEach(k => { s[k] = data.stats[k]; });
+    /* НАША ПРАВКА: одноразовые отметки «это уже случилось» с сервера не гасим.
+       Сервер только досчитывает показатели, сам он такие отметки никогда не
+       ставит. А приглашение в школу выдаётся при загрузке игры — то есть до
+       того, как мы успеваем спросить сервер, и снимок у него ещё со старым
+       false. Раньше он затирал только что поднятый флаг, при следующем пуске
+       игра снова считала, что питомец в школу не звали, и письмо приходило
+       каждый день заново. Гасим только в одну сторону: если локально уже
+       true, а с сервера пришло false — оставляем true. */
+    const ONE_SHOT = ['has_received_school_invite', 'is_revived_once', 'is_potty_trained'];
+    Object.keys(data.stats).forEach(k => {
+      if (ONE_SHOT.indexOf(k) !== -1 && s[k] && !data.stats[k]) return;
+      s[k] = data.stats[k];
+    });
 
     // огород и животные тоже приходят с сервера
     try {
@@ -1610,6 +1651,41 @@
     };
   }
 
+  /* ------------------------------------------------------------------------ */
+  /* Скорость жизни. Числа в подписях — не на глаз: это измеренное время, за
+     которое взрослый питомец из сытого становится голодным. У малыша всё
+     примерно вдвое быстрее.                                                   */
+  /* ------------------------------------------------------------------------ */
+  const LIVES = [
+    { v: 0.3, label: '30%',  note: 'Спокойно: взрослый просит есть примерно раз в 2 часа, спать — раз в сутки' },
+    { v: 0.2, label: '20%',  note: 'Очень спокойно: есть — раз в 3 часа. Можно спокойно уехать на день' },
+    { v: 1,   label: '100%', note: 'Как в оригинале Tamaweb: голодный через 35 минут, скучно через 23. Это много' },
+    { v: 0.5, label: '50%',  note: 'Активно: есть — примерно раз в час' },
+  ];
+
+  const lifeLabel = v => {
+    const found = LIVES.find(s => s.v === v);
+    return found ? found.label : Math.round(v * 100) + '%';
+  };
+
+  function lifeItem() {
+    return {
+      icon: 'heart-pulse',
+      name: 'скорость жизни: ' + lifeLabel(lifeSpeed()),
+      onclick: (btn) => {
+        const idx = LIVES.findIndex(s => s.v === lifeSpeed());
+        const next = LIVES[((idx < 0 ? 0 : idx) + 1) % LIVES.length];
+        App.settings.lifeSpeed = next.v;
+        App.save();
+        pushSave(true);
+        btn.innerHTML = (App.getIcon ? App.getIcon('heart-pulse', true) : '') +
+                        ' скорость жизни: ' + lifeLabel(next.v);
+        popup(next.note, 5000);
+        return true;
+      }
+    };
+  }
+
   function modeItem() {
     return {
       icon: 'calculator',
@@ -1668,7 +1744,7 @@
       });
     let at = copy.findIndex(it => typeof it.name === 'string' && /save management|управление сохранени/i.test(it.name));
     if (at === -1) at = copy.findIndex(it => typeof it.name === 'string' && /manual save|сохранить вручную/i.test(it.name));
-    const mine = [menuItem(), soundItem(), speedItem(), modeItem()];
+    const mine = [menuItem(), soundItem(), lifeItem(), speedItem(), modeItem()];
     /* Пункты от других наших файлов (например фотокорпус) — через общий список,
        чтобы никто больше не перехватывал displayList и не спорил за него. */
     for (const make of (window.TamaExtraMenu || [])) {

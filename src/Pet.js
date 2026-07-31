@@ -898,15 +898,24 @@ class Pet extends Object2d {
            из оригинального Tamaweb. Зовём метод у объекта — и всё оживает. */
         const hasTrait = (key) => this.petDefinition.hasTrait(key);
 
-        let depletion_mult = 1, offlineAndIsNight = false;
+        /* НАША ПРАВКА: «скорость жизни» — общий множитель расхода всех
+           показателей. Действует ВЕЗДЕ: и в открытой игре, и в закрытой, и на
+           сервере (туда она уезжает в снимке). Оригинальный Tamaweb рассчитан
+           на короткие забеги: у взрослого сытость падает со 100 до нуля за 57
+           минут, скука — за 35, а сон садится за 4 часа, из-за чего питомец
+           просится спать среди дня. При 30 % это превращается в «есть просит
+           раз в пару часов», как на настоящем Tamagotchi Connection. */
+        const LIFE_SPEED_DEFAULT = 0.3;   // то же значение, что ставит sync.js
+        const lifeSpeed = App.settings?.lifeSpeed;
+        let depletion_mult = (typeof lifeSpeed === 'number' && lifeSpeed > 0) ? lifeSpeed : LIFE_SPEED_DEFAULT;
+        let offlineAndIsNight = false;
         if(isOfflineProgression){
-            /* НАША ПРАВКА: скорость жизни в закрытой игре стала настройкой.
-               1 — всё идёт ровно так же, как при открытом приложении (по умолчанию).
-               0.25 и 0.05 ночью — как было в оригинале Tamaweb.
+            /* Дополнительное замедление ТОЛЬКО пока игра закрыта. По умолчанию
+               1 — закрытая игра идёт с той же скоростью, что открытая.
                Ночью питомец всё равно спит: offlineAndIsNight включает
                восстановление сна, а расход считается по той же скорости. */
             const offlineSpeed = App.settings?.offlineSpeed;
-            depletion_mult = (typeof offlineSpeed === 'number' && offlineSpeed >= 0) ? offlineSpeed : 1;
+            depletion_mult *= (typeof offlineSpeed === 'number' && offlineSpeed >= 0) ? offlineSpeed : 1;
 
             if(App.isSleepHour(hour)){
                 offlineAndIsNight = true;
