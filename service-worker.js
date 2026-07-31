@@ -48,6 +48,10 @@ const ASSETS = [
   "resources/img/skins/scene_90s.jpg",
   "resources/img/skins/scene_room.jpg",
   "resources/img/skins/scene_neon.jpg",
+  "resources/img/skins/scene_ussr.jpg",
+  "resources/img/skins/scene_cyber.jpg",
+  "resources/img/skins/scene_jungle.jpg",
+  "resources/img/skins/scene_office.jpg",
   "resources/font/PixelifySans-RU.ttf",
   // libs
   "src/libs/moment.js",
