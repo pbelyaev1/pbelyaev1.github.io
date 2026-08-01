@@ -44,13 +44,16 @@
   /* ---------------------------------------------------------------------- */
   /* Состояние пачки                                                         */
   /* ---------------------------------------------------------------------- */
-  let batch = { lines: [], at: 0, key: '', source: 'нет', model: null, error: null, stage: null };
+  let batch = { lines: [], groups: {}, at: 0, key: '', source: 'нет', model: null, error: null, stage: null };
   let asking = false;
   let lastAsk = 0;
 
   try {
     const saved = JSON.parse(localStorage.getItem(LS_BATCH) || 'null');
-    if (saved && Array.isArray(saved.lines)) batch = saved;
+    if (saved && Array.isArray(saved.lines)) {
+      batch = saved;
+      if (!batch.groups || typeof batch.groups !== 'object') batch.groups = {};
+    }
   } catch (e) {}
 
   const save = () => {
@@ -153,19 +156,23 @@
       });
       const d = r && r.data;
       if (d && Array.isArray(d.lines) && d.lines.length) {
-        batch = { lines: d.lines.slice(), at: now, key,
+        batch = { lines: d.lines.slice(), groups: (d.groups && typeof d.groups === 'object') ? d.groups : {},
+                  at: now, key,
                   source: d.source || 'модель', model: d.model || null,
                   error: d.error || null, stage: d.stage || null };
+        порядки = {};
         save();
         return true;
       }
       /* Пусто — запоминаем причину для диагностики и живём на своём генераторе */
-      batch = { lines: [], at: now, key, source: (d && d.source) || 'нет связи',
+      batch = { lines: [], groups: {}, at: now, key, source: (d && d.source) || 'нет связи',
                 model: null, error: (d && d.error) || null, stage: (d && d.stage) || null };
+      порядки = {};
       save();
     } catch (e) {
-      batch = { lines: [], at: now, key, source: 'нет связи', model: null,
+      batch = { lines: [], groups: {}, at: now, key, source: 'нет связи', model: null,
                 error: String(e && e.message || e), stage: null };
+      порядки = {};
       save();
     } finally {
       asking = false;
@@ -187,25 +194,32 @@
   /* Выдача реплики                                                          */
   /* ---------------------------------------------------------------------- */
   /* Реплики раздаём по кругу в перемешанном порядке: подряд одна и та же
-     фраза выглядит поломкой, даже если пачка большая. */
-  let порядок = [], указатель = 0, порядокДля = '';
+     фраза выглядит поломкой, даже если пачка большая. Порядок свой у каждого
+     повода — иначе редкий повод всегда выдавал бы одну и ту же реплику. */
+  let порядки = {};
 
-  function next() {
-    if (!batch.lines.length) return null;
-    const метка = batch.at + ':' + batch.lines.length;
-    if (порядокДля !== метка) {
-      порядок = batch.lines.map((_, i) => i);
-      for (let i = порядок.length - 1; i > 0; i--) {
+  function изГруппы(имя) {
+    const список = имя === 'просто'
+      ? (batch.lines || [])
+      : ((batch.groups && batch.groups[имя]) || []);
+    if (!список.length) return null;
+
+    const метка = batch.at + ':' + список.length;
+    let п = порядки[имя];
+    if (!п || п.метка !== метка) {
+      const idx = список.map((_, i) => i);
+      for (let i = idx.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
-        [порядок[i], порядок[j]] = [порядок[j], порядок[i]];
+        [idx[i], idx[j]] = [idx[j], idx[i]];
       }
-      указатель = 0;
-      порядокДля = метка;
+      п = порядки[имя] = { метка, idx, при: 0 };
     }
-    const s = batch.lines[порядок[указатель % порядок.length]];
-    указатель++;
+    const s = список[п.idx[п.при % п.idx.length]];
+    п.при++;
     return s || null;
   }
+
+  const next = (имя) => изГруппы(имя || 'просто');
 
   /* ---------------------------------------------------------------------- */
   /* Подмена источника реплик                                                */
@@ -228,6 +242,145 @@
     наш.__ai = true;
     наш.__prev = прежний;
     window.ruRandomSentence = наш;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Поводы заговорить                                                       */
+  /* ---------------------------------------------------------------------- */
+  /* Пузырь по таймеру — слабый канал: чтобы услышать питомца, надо сидеть и
+     смотреть на пустой экран. Поэтому он отвечает на то, что ты с ним сделал.
+
+     Смотрим за состоянием, а не перехватываем методы игры. Так реакция
+     сработает независимо от того, каким путём еда попала в питомца — из
+     холодильника, из подарка, из мини-игры, — и ни один наш патч не может
+     сломать чужой код, которого он не трогает. */
+
+  const ТИК = 700;                      // как часто сверяем состояние
+  const ПАУЗА_ОБЩАЯ  = 8 * 1000;        // не тараторить: одна реакция за раз
+  const ПАУЗА_ПОВОДА = 60 * 1000;       // один и тот же повод — не чаще
+  const ЗАДЕРЖКА = 700;                 // дать анимации начаться
+
+  let прошлое = null;
+  let последняяРеакция = 0;
+  const когдаПовод = {};
+
+  /* Сколько ждать реплики после закрытия игры, чтобы считать это возвращением */
+  const ДОЛГО = 3 * 60 * 60 * 1000;
+
+  function сказать(повод, задержка) {
+    if (!isOn() || !hasApp() || !App.pet) return false;
+    const now = Date.now();
+    if (now - последняяРеакция < ПАУЗА_ОБЩАЯ) return false;
+    if (now - (когдаПовод[повод] || 0) < ПАУЗА_ПОВОДА) return false;
+
+    const s = изГруппы(повод);
+    /* Реплик на этот повод не приехало — молчим. Случайная фраза не про то
+       хуже тишины: она сразу выдаёт, что за питомцем никого нет. */
+    if (!s) return false;
+
+    последняяРеакция = now;
+    когдаПовод[повод] = now;
+    setTimeout(() => {
+      try {
+        if (App.pet && !App.pet.stats.is_sleeping) App.pet.say(s, 5000);
+      } catch (e) {}
+    }, задержка == null ? ЗАДЕРЖКА : задержка);
+    return true;
+  }
+
+  /* Снимок того, за чем следим. */
+  function снимок() {
+    if (!hasApp() || !App.pet || !App.petDefinition) return null;
+    const s = App.pet.stats;
+    return {
+      hunger: s.current_hunger,
+      fun:    s.current_fun,
+      clean:  s.current_cleanliness,
+      health: s.current_health,
+      poop:   s.has_poop_out || 0,
+      sleep:  !!s.is_sleeping,
+      hole:   !!(s.current_rabbit_hole && s.current_rabbit_hole.name),
+      stage:  App.petDefinition.lifeStage,
+      praise: s.last_time_praise_given || 0,
+      discip: s.current_discipline,
+      misbeh: !!s.is_misbehaving,
+      max:    s.max_hunger || 100,
+    };
+  }
+
+  /* Что именно изменилось. Порядок проверок = приоритет: если за один тик
+     случилось два события, говорим про более значимое. */
+  /* Сколько показателей дёрнулось за один тик. Синхронизация с сервером и
+     догон офлайн-прогресса меняют всё сразу — это не событие, это переезд,
+     и радоваться «еде» тут было бы враньём. */
+  function сколькоПрыгнуло(a, b) {
+    let n = 0;
+    for (const k of ['hunger', 'fun', 'clean', 'health']) {
+      if (Math.abs((b[k] || 0) - (a[k] || 0)) > 3) n++;
+    }
+    return n;
+  }
+
+  function поводИзменения(a, b) {
+    if (b.stage !== a.stage) return 'повзрослел';
+    if (a.hole && !b.hole) return 'вернулся';
+    if (a.sleep && !b.sleep) return 'проснулся';
+
+    /* Похвала и ругань: у игры для них есть свои отметки времени и счётчик
+       послушания, лезть в её методы не нужно. */
+    if (b.praise > a.praise) return 'похвала';
+    if (a.misbeh && !b.misbeh && b.discip > a.discip) return 'ругань';
+
+    if (сколькоПрыгнуло(a, b) > 1) return null;
+
+    if (b.health > a.health + 3) return 'лекарство';
+    if (b.hunger > a.hunger + 3) {
+      /* Уже был почти сыт, а его всё кормят — это другой разговор. */
+      return a.hunger > b.max * 0.85 ? 'сыт' : 'еда';
+    }
+    if (b.fun > a.fun + 3) return 'игра';
+    if (b.clean > a.clean + 3 || (a.poop > 0 && b.poop < a.poop)) return 'чистота';
+    return null;
+  }
+
+  function следить() {
+    const сейчас = снимок();
+    if (!сейчас) return;
+    if (!прошлое) { прошлое = сейчас; return; }
+
+    /* Во время сценки (ест, моется, играет) состояние уже изменилось, но
+       говорить рано — реплика перебьёт саму сценку. Ждём следующего тика. */
+    const повод = поводИзменения(прошлое, сейчас);
+    прошлое = сейчас;
+    if (!повод) return;
+    if (needsRefresh()) ask(false);
+    сказать(повод);
+  }
+
+  /* Приветствие при запуске. «Давно» считаем по последней отметке игры о том,
+     когда её видели, — её же ведёт синхронизация. */
+  function поздороваться() {
+    let ушёл = 0;
+    try {
+      const t = Number(localStorage.getItem('tama_ai_seen') || 0);
+      if (t) ушёл = Date.now() - t;
+    } catch (e) {}
+    try { localStorage.setItem('tama_ai_seen', String(Date.now())); } catch (e) {}
+    /* Первый запуск вообще — здороваться не с чем. */
+    if (!ушёл) return;
+    const повод = ушёл > ДОЛГО ? 'соскучился' : 'привет';
+    /* Пачка могла ещё не приехать — тогда пробуем ещё раз, когда приедет.
+       Здороваться через минуту после запуска глупо, поэтому попыток две. */
+    if (!сказать(повод, 1500)) setTimeout(() => сказать(повод, 0), 9000);
+  }
+
+  function отмечатьУход() {
+    const пометка = () => {
+      try { localStorage.setItem('tama_ai_seen', String(Date.now())); } catch (e) {}
+    };
+    document.addEventListener('visibilitychange', () => { if (document.hidden) пометка(); });
+    window.addEventListener('pagehide', пометка);
+    setInterval(пометка, 60 * 1000);
   }
 
   /* ---------------------------------------------------------------------- */
@@ -260,6 +413,12 @@
   (function wait(tries) {
     if (started() && typeof window.ruRandomSentence === 'function') {
       hook();
+      прошлое = снимок();
+      отмечатьУход();
+      setInterval(следить, ТИК);
+      /* Здороваемся после того, как игра дорисовала первый кадр и закрыла
+         свои стартовые окна, иначе пузырь появится под ними. */
+      setTimeout(поздороваться, 3500);
       /* первую пачку просим не сразу: пусть игра догрузится и синхронизируется */
       setTimeout(() => { if (needsRefresh()) ask(true); }, 8000);
       setInterval(() => { if (needsRefresh()) ask(false); }, 60 * 1000);
@@ -276,13 +435,19 @@
     ask,                                    // принудительно обновить пачку
     batch: () => JSON.parse(JSON.stringify(batch)),
     next,                                   // следующая реплика, как её увидит игра
+    say: сказать,                           // сказать по поводу (для проверки)
+    watch: следить,                         // один шаг наблюдателя
+    snap: снимок,
+    reason: поводИзменения,                 // какой повод дало изменение
+    /* для тестов: снять паузы между репликами */
+    _reset: () => { последняяРеакция = 0; for (const k in когдаПовод) delete когдаПовод[k]; },
     key: stateKey,
     payload: () => (started() ? payload() : null),
     /* для тестов: подсунуть пачку, не ходя на сервер */
-    _set: (lines, source) => {
-      batch = { lines: lines.slice(), at: Date.now(), key: stateKey(),
+    _set: (lines, source, groups) => {
+      batch = { lines: lines.slice(), groups: groups || {}, at: Date.now(), key: stateKey(),
                 source: source || 'подстановка', model: null, error: null, stage: null };
-      порядокДля = '';
+      порядки = {};
       save();
     },
   };

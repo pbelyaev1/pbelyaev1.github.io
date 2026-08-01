@@ -1304,7 +1304,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 13;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 14;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -1416,7 +1416,9 @@
           rows.push('модель: <small>' +
             String(b.model).split('/').pop().replace(/:free$/, '') + '</small>');
         }
+        const поводов = Object.keys(b.groups || {}).length;
         rows.push('реплик в запасе: <b>' + b.lines.length + '</b>, пачке ' + ago(b.at));
+        rows.push('поводов заговорить: <b>' + поводов + '</b>');
       } else {
         rows.push('<b>реплик от модели нет</b> — питомец бормочет, как в оригинале');
         if (b.source && b.source !== 'нет') rows.push('причина: ' + b.source);
@@ -1437,8 +1439,13 @@
                           (u && u.err_at && !b.error ? ' <small>(' + ago(u.err_at) + ')</small>' : ''));
       if (u) {
         rows.push('обращений к модели сегодня: <b>' + (u.calls || 0) + '</b>' +
-                  (u.fails ? ', из них впустую ' + u.fails : '') +
-                  ' <small>(бесплатный лимит — 50 в сутки)</small>');
+                  (u.fails ? ', из них впустую ' + u.fails : ''));
+        /* Остаток берём не из головы, а из ответа самого OpenRouter: лимит
+           зависит от того, пополнялся ли когда-нибудь счёт. Нет заголовка —
+           нет и строки, выдумывать число нельзя. */
+        if (typeof u.left === 'number') {
+          rows.push('осталось у OpenRouter: <b>' + u.left + '</b>');
+        }
       }
       if (b.lines && b.lines.length) {
         /* Показываем живой пример: видно, что это не заглушка. */
