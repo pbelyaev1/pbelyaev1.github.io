@@ -1304,7 +1304,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 16;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 17;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -1445,6 +1445,12 @@
            нет и строки, выдумывать число нельзя. */
         if (typeof u.left === 'number') {
           rows.push('осталось у OpenRouter: <b>' + u.left + '</b>');
+        }
+        /* Сколько модель думала в последний раз. По этой цифре видно, стоит ли
+           менять список моделей, — гадать по ощущениям тут бесполезно. */
+        if (typeof u.ms === 'number') {
+          rows.push('последний ответ занял <b>' + (u.ms / 1000).toFixed(1) + ' с</b>' +
+                    (u.model ? ' <small>(' + String(u.model).split('/').pop().replace(/:free$/, '') + ')</small>' : ''));
         }
       }
       if (b.lines && b.lines.length) {
