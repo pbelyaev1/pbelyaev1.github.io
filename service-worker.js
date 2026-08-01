@@ -37,6 +37,7 @@ const ASSETS = [
   "src/i18n.js",
   "src/sync.js",
   "src/skin.js",
+  "src/ai.js",
   "resources/img/skins/shell_cream.png",
   "resources/img/skins/shadow_cream.png",
   "resources/img/skins/bg_wood.jpg",

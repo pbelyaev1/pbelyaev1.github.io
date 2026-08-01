@@ -1304,7 +1304,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 12;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 13;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -1392,6 +1392,55 @@
       name: '<small>Пока игра открыта, напоминания не приходят — ты и так всё видишь. ' +
             'Они начнут приходить через пару минут после того, как закроешь приложение.</small>'
     });
+
+    /* ---------------------------------------------------------------- */
+    /* Голос питомца. Здесь важно не «включено ли», а откуда прямо сейчас
+       берутся его реплики. Если модель молчит — так и написать, а не
+       делать вид, что всё в порядке: игрок слышит разницу. */
+    if (typeof window.TamaAI !== 'undefined') {
+      items.push({ type: 'separator' });
+      const ai = window.TamaAI;
+      const b = ai.batch();
+      const rows = [];
+
+      /* Первая строка всегда отвечает на один вопрос: чьими словами питомец
+         говорит прямо сейчас. Всё остальное — уже подробности. */
+      const есть = !!(b.lines && b.lines.length);
+      if (!ai.isOn()) {
+        rows.push('<b>голос выключен</b> — питомец бормочет, как в оригинале');
+      } else if (есть) {
+        rows.push('сейчас говорит: <b>' + (b.source || 'модель') + '</b>');
+        if (b.model) rows.push('модель: <small>' + b.model + '</small>');
+        rows.push('реплик в запасе: <b>' + b.lines.length + '</b>, пачке ' + ago(b.at));
+      } else {
+        rows.push('<b>реплик от модели нет</b> — питомец бормочет, как в оригинале');
+        if (b.source && b.source !== 'нет') rows.push('причина: ' + b.source);
+      }
+      /* Причина, по которой их может не быть, — отдельной строкой, а не
+         вместо ответа: пачка могла остаться с прошлого раза. */
+      if (ai.isOn() && !err) {
+        if (!st || !st.ai) {
+          rows.push('сервер не рассказал про голос — <b>нужна версия воркера ' +
+                    SERVER_VERSION + '</b>');
+        } else if (!st.ai.key) {
+          rows.push('<b>на сервере нет ключа OpenRouter</b> — новых реплик не будет');
+        }
+      }
+      const u = (st && st.ai && st.ai.usage) || null;
+      const беда = b.error || (u && u.err) || null;
+      if (беда) rows.push('последняя загвоздка: <b>' + беда + '</b>' +
+                          (u && u.err_at && !b.error ? ' <small>(' + ago(u.err_at) + ')</small>' : ''));
+      if (u) {
+        rows.push('обращений к модели сегодня: <b>' + (u.calls || 0) + '</b>' +
+                  (u.fails ? ', из них впустую ' + u.fails : '') +
+                  ' <small>(бесплатный лимит — 50 в сутки)</small>');
+      }
+      if (b.lines && b.lines.length) {
+        /* Показываем живой пример: видно, что это не заглушка. */
+        rows.push('<small>например: «' + b.lines[0] + '»</small>');
+      }
+      items.push({ type: 'info', icon: 'comment', name: rows.join('<br>') });
+    }
 
     items.push({ type: 'separator' });
     const stats = STAT_NAMES.map(([cur, max, label]) => {
@@ -1804,6 +1853,7 @@
     },
     async status() { const { data } = await api('/api/status'); console.log(data); return data; },
     async testPush() { const { data } = await api('/api/test-push', { method: 'POST' }); console.log(data); return data; },
+    api,                       // нужен ai.js, чтобы ходить на сервер тем же путём
     notifications: enableNotifications,
     menu: openMenu,
     push: () => pushSave(true),
