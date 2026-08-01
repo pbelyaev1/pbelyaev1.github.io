@@ -1304,7 +1304,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 14;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 15;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
@@ -1452,6 +1452,21 @@
         rows.push('<small>например: «' + b.lines[0] + '»</small>');
       }
       items.push({ type: 'info', icon: 'comment', name: rows.join('<br>') });
+
+      /* Память — отдельной строкой. Существо, которое тебя помнит, должно
+         уметь показать, что именно оно помнит: иначе это просто обещание. */
+      const m = (st && st.ai && st.ai.mem) || null;
+      const ждёт = (typeof window.TamaTalk !== 'undefined') ? window.TamaTalk.buffer().length : 0;
+      const пам = [];
+      if (m) {
+        пам.push('помнит событий: <b>' + (m.log || 0) + '</b>' +
+                 (m.story ? ', и есть сводка прошлого' : ''));
+        пам.push('знает про тебя: <b>' + (m.facts || 0) + '</b>');
+      } else {
+        пам.push('память сервер пока не отдал');
+      }
+      if (ждёт) пам.push('в очереди на отправку: ' + ждёт);
+      items.push({ type: 'info', icon: 'brain', name: пам.join('<br>') });
     }
 
     items.push({ type: 'separator' });

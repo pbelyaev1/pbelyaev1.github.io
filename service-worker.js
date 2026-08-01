@@ -38,6 +38,7 @@ const ASSETS = [
   "src/sync.js",
   "src/skin.js",
   "src/ai.js",
+  "src/talk.js",
   "resources/img/skins/shell_cream.png",
   "resources/img/skins/shadow_cream.png",
   "resources/img/skins/bg_wood.jpg",
