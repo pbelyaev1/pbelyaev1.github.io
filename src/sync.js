@@ -1304,7 +1304,7 @@
     ['current_health', 'max_health', 'здоровье'],
   ];
 
-  const SERVER_VERSION = 15;     // такую версию воркера ждёт этот клиент
+  const SERVER_VERSION = 16;     // такую версию воркера ждёт этот клиент
 
   function ago(ms) {
     if (!ms) return 'никогда';
